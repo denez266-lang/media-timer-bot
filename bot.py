@@ -1,10 +1,10 @@
 import os, time, asyncio, logging, datetime
 import json, secrets, tempfile, io
 from urllib.parse import quote
-from telegram import InputMediaPhoto, InputMediaDocument
+from telegram import InputMediaPhoto, InputMediaDocument, MessageEntity
 import httpx
 from telegram import InlineKeyboardButton as B, InlineKeyboardMarkup as M, Update
-from telegram.error import Forbidden, RetryAfter, TelegramError
+from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 from telegram.ext import (Application, ApplicationHandlerStop, CallbackQueryHandler,
                           CommandHandler, ContextTypes, MessageHandler, TypeHandler, filters)
 from store import Store
@@ -498,7 +498,8 @@ async def collect_media(update: Update, ctx):
     if ctx.user_data.get("await") == "broadcast":
         ctx.user_data.pop("await", None)
         t0, f0 = media_of(update.message)
-        await bc_preview(update, ctx, {"k": t0, "f": f0, "cap": update.message.caption or ""})
+        await bc_preview(update, ctx, {"k": t0, "f": f0, "cap": update.message.caption or "",
+                                       "ents": [e.to_dict() for e in (update.message.caption_entities or [])]})
         return
     col = ctx.user_data.get("collect")
     if col is None:
@@ -952,13 +953,41 @@ def bc_markup():
     return None
 
 
+def _ents(bot, bc, strip_custom=False):
+    out = []
+    for d in bc.get("ents") or []:
+        if strip_custom and d.get("type") == "custom_emoji":
+            continue
+        out.append(MessageEntity.de_json(d, bot))
+    return out or None
+
+
+def _has_custom(bc):
+    return any(d.get("type") == "custom_emoji" for d in (bc.get("ents") or []))
+
+
 async def bc_send(bot, uid, bc, silent, markup):
-    kw = {"disable_notification": silent, "reply_markup": markup}
-    if bc["k"] == "text":
-        return await bot.send_message(uid, bc["text"], **kw)
-    fn = {"photo": bot.send_photo, "video": bot.send_video, "animation": bot.send_animation,
-          "document": bot.send_document}[bc["k"]]
-    return await fn(uid, bc["f"], caption=bc.get("cap") or None, **kw)
+    """Sends one broadcast item. Keeps formatting and animated (Premium) emoji; if Telegram refuses the custom emoji,
+    resends with the normal emoji characters and flags bc['_fallback']."""
+    for strip in ((False, True) if _has_custom(bc) else (False,)):
+        kw = {"disable_notification": silent, "reply_markup": markup}
+        try:
+            if bc["k"] == "text":
+                return await bot.send_message(uid, bc["text"], entities=_ents(bot, bc, strip), **kw)
+            fn = {"photo": bot.send_photo, "video": bot.send_video, "animation": bot.send_animation,
+                  "document": bot.send_document}[bc["k"]]
+            return await fn(uid, bc["f"], caption=bc.get("cap") or None, caption_entities=_ents(bot, bc, strip), **kw)
+        except BadRequest as e:
+            if strip or not _has_custom(bc):
+                raise
+            logging.warning("custom emoji refused: %s", e)
+            bc["ents"] = [d for d in bc["ents"] if d.get("type") != "custom_emoji"]  # stop trying for later recipients
+            bc["_fallback"] = True
+            strip = True
+            try:
+                return await bc_send(bot, uid, bc, silent, markup)
+            except BadRequest:
+                raise
 
 
 async def run_broadcast(app, admin_id, bc, prog):
@@ -1120,7 +1149,9 @@ async def admin_input(update: Update, ctx) -> bool:
             note = f"⚠️ انضافت، بس ما كدرت أوصل للقناة ({e}). تأكد من اليوزر وأضف البوت أدمن."
         await update.message.reply_text(note)
     elif key == "broadcast":
-        await bc_preview(update, ctx, {"k": "text", "text": text})
+        raw = update.message.text
+        await bc_preview(update, ctx, {"k": "text", "text": raw,
+                                       "ents": [e.to_dict() for e in (update.message.entities or [])]})
     elif key == "bc_ttl":
         if text in ("0", "-"):
             s.set("bc_ttl", "0")
@@ -1158,6 +1189,10 @@ async def bc_preview(update, ctx, bc):
     except TelegramError as e:
         await update.message.reply_text(f"ما كدرت أعرض المعاينة: {e}")
         return
+    if bc.pop("_fallback", False):
+        await update.message.reply_text("⚠️ تيليجرام رفض الإيموجي المتحركة (المميزة). لازم حساب مالك البوت يكون عنده Telegram Premium. إذا أرسلت هيجي، راح توصل الإيموجي عادية بدون حركة.")
+    elif _has_custom(bc):
+        await update.message.reply_text("✨ الإيموجي المتحركة انقبلت بالمعاينة، وراح توصل متحركة.")
     await update.message.reply_text(
         f"راح ترسل لـ {n} مستخدم ({aud_text(aud)})"
         f"{' بصمت' if store.on('bc_silent') else ''}"
