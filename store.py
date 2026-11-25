@@ -32,11 +32,18 @@ class Store:
         self.q("CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT)")
         self.q("CREATE TABLE IF NOT EXISTS channels(id INTEGER PRIMARY KEY AUTOINCREMENT, ref TEXT UNIQUE, enabled INTEGER DEFAULT 1)")
         self.q("CREATE TABLE IF NOT EXISTS links(code TEXT PRIMARY KEY, items TEXT, created REAL, views INTEGER DEFAULT 0)")
-        for col, typ in (("name", "TEXT"), ("delay", "INTEGER"), ("note", "TEXT"), ("need", "INTEGER"), ("blur", "INTEGER"), ("lock_msg", "TEXT"), ("protect", "INTEGER")):
+        for col, typ in (("name", "TEXT"), ("delay", "INTEGER"), ("note", "TEXT"), ("need", "INTEGER"), ("blur", "INTEGER"), ("lock_msg", "TEXT"), ("protect", "INTEGER"), ("seq", "INTEGER")):
             try:
                 self.q(f"ALTER TABLE links ADD COLUMN {col} {typ}")
             except sqlite3.OperationalError:
                 pass
+        try:
+            self.q("ALTER TABLE users ADD COLUMN src TEXT")
+        except sqlite3.OperationalError:
+            pass
+        self.q("CREATE TABLE IF NOT EXISTS link_visits(id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT, uid INTEGER, ts REAL, inviter INTEGER, locked INTEGER, is_new INTEGER)")
+        if not self.get("linkseq"):
+            self.set("linkseq", str(self.q("SELECT COUNT(*) FROM links", one=True)[0]))
         self.q("CREATE TABLE IF NOT EXISTS invites(code TEXT, inviter INTEGER, invited INTEGER, ts REAL, PRIMARY KEY(code, invited))")
         self.q("CREATE TABLE IF NOT EXISTS pending(id INTEGER PRIMARY KEY AUTOINCREMENT, chat INTEGER, ids TEXT, at REAL)")
         self.q("CREATE TABLE IF NOT EXISTS log(ts REAL, kind TEXT, uid INTEGER, text TEXT)")
@@ -68,15 +75,15 @@ class Store:
         self.set(k, "0" if self.on(k) else "1")
 
     # users
-    def touch_user(self, uid, name, username, inviter=None):
+    def touch_user(self, uid, name, username, inviter=None, src=None):
         """Returns True if the user is new."""
         r = self.q("SELECT id FROM users WHERE id=?", (uid,), one=True)
         now = time.time()
         if r:
             self.q("UPDATE users SET name=?, username=?, last_seen=? WHERE id=?", (name, username, now, uid))
             return False
-        self.q("INSERT INTO users(id,name,username,joined,last_seen,inviter) VALUES(?,?,?,?,?,?)",
-               (uid, name, username, now, now, inviter))
+        self.q("INSERT INTO users(id,name,username,joined,last_seen,inviter,src) VALUES(?,?,?,?,?,?,?)",
+               (uid, name, username, now, now, inviter, src))
         return True
 
     def all_user_ids(self, include_banned=False):
@@ -143,9 +150,12 @@ class Store:
     # links
     def add_link(self, code, items, name=""):
         """New link copies the current defaults, so later changes to one link or to the defaults never touch another link."""
-        self.q("INSERT INTO links(code,items,created,name,delay,note,blur,lock_msg,protect) VALUES(?,?,?,?,?,?,?,?,?)",
+        seq = int(self.get("linkseq") or 0) + 1
+        self.set("linkseq", str(seq))
+        self.q("INSERT INTO links(code,items,created,name,delay,note,blur,lock_msg,protect,seq) VALUES(?,?,?,?,?,?,?,?,?,?)",
                (code, json.dumps(items), time.time(), name, int(self.get("delay") or 30), self.get("note"),
-                int(self.get("blur") or 3), self.get("lock_msg"), 1 if self.on("protect") else 0))
+                int(self.get("blur") or 3), self.get("lock_msg"), 1 if self.on("protect") else 0, seq))
+        return seq
 
     def reset_link(self, code):
         self.q("UPDATE links SET delay=?,note=?,blur=?,lock_msg=?,protect=? WHERE code=?",
@@ -215,3 +225,45 @@ class Store:
 
     def invite_total(self, code):
         return self.q("SELECT COUNT(*) FROM invites WHERE code=?", (code,), one=True)[0]
+
+    # ---- per-link statistics ----
+    def link_seq(self, code):
+        r = self.q("SELECT seq FROM links WHERE code=?", (code,), one=True)
+        return r[0] if r else None
+
+    def add_visit(self, code, uid, inviter, locked, is_new):
+        self.q("INSERT INTO link_visits(code,uid,ts,inviter,locked,is_new) VALUES(?,?,?,?,?,?)",
+               (code, uid, time.time(), inviter, 1 if locked else 0, 1 if is_new else 0))
+
+    def user_src(self, uid):
+        r = self.q("SELECT src FROM users WHERE id=?", (uid,), one=True)
+        return r[0] if r else None
+
+    def link_stats(self, code, need):
+        one = lambda sql, a=(): self.q(sql, a, one=True)[0]
+        d = {}
+        d["opens"] = one("SELECT COUNT(*) FROM link_visits WHERE code=?", (code,))
+        d["people"] = one("SELECT COUNT(DISTINCT uid) FROM link_visits WHERE code=?", (code,))
+        d["repeat"] = one("SELECT COUNT(*) FROM (SELECT uid FROM link_visits WHERE code=? GROUP BY uid HAVING COUNT(*)>1)", (code,))
+        d["new_users"] = one("SELECT COUNT(*) FROM users WHERE src=?", (code,))
+        d["locked"] = one("SELECT COUNT(DISTINCT uid) FROM link_visits WHERE code=? AND locked=1", (code,))
+        d["via_invite"] = one("SELECT COUNT(DISTINCT uid) FROM link_visits WHERE code=? AND inviter IS NOT NULL", (code,))
+        d["invites"] = one("SELECT COUNT(*) FROM invites WHERE code=?", (code,))
+        d["inviters"] = one("SELECT COUNT(DISTINCT inviter) FROM invites WHERE code=?", (code,))
+        if need > 0:
+            d["unlocked"] = one("SELECT COUNT(*) FROM (SELECT inviter FROM invites WHERE code=? GROUP BY inviter HAVING COUNT(*)>=?)", (code, need))
+        else:
+            d["unlocked"] = d["people"]
+        r = self.q("SELECT MIN(ts),MAX(ts) FROM link_visits WHERE code=?", (code,), one=True)
+        d["first"], d["last"] = r
+        d["days"] = self.q("SELECT strftime('%m-%d', ts+10800, 'unixepoch') d, COUNT(*), COUNT(DISTINCT uid) FROM link_visits WHERE code=? GROUP BY d ORDER BY d DESC LIMIT 7", (code,), many=True)
+        d["top"] = self.q("""SELECT i.inviter, u.name, u.username, COUNT(*) c FROM invites i LEFT JOIN users u ON u.id=i.inviter
+                             WHERE i.code=? GROUP BY i.inviter ORDER BY c DESC LIMIT 5""", (code,), many=True)
+        return d
+
+    def visits_page(self, code, limit, offset):
+        total = self.q("SELECT COUNT(*) FROM link_visits WHERE code=?", (code,), one=True)[0]
+        rows = self.q("""SELECT v.ts, v.uid, u.name, u.username, v.is_new, v.inviter, iu.name, v.locked
+                         FROM link_visits v LEFT JOIN users u ON u.id=v.uid LEFT JOIN users iu ON iu.id=v.inviter
+                         WHERE v.code=? ORDER BY v.ts DESC LIMIT ? OFFSET ?""", (code, limit, offset), many=True)
+        return total, rows
