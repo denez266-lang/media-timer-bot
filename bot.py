@@ -545,12 +545,17 @@ async def pub_buttons(update: Update, ctx, parts):
                 store.log("channel_post", update.effective_user.id, pub["code"])
                 if kept is False:
                     logging.warning("custom emoji dropped in copied channel post")
+                    ed = await _try_edit_emoji(ctx.bot, chat, new_ids[0], pub)
+                    if ed:
+                        ctx.user_data.pop("pub", None)
+                        await q.message.reply_text("✅ اننشر بالقناة، وتعديل الوصف بعد النشر خلّى الإيموجي المتحرك تظهر (تأكدت من رد تلكرام).")
+                        return
                     try:
                         await ctx.bot.delete_messages(chat, new_ids)
                     except Exception:
                         pass
                     await q.message.reply_text(
-                        "تلكرام ما يخلي الإيموجي المتحرك تنزل بالقناة حتى بالنسخ، فحذفت المنشور من القناة. تنشره بإيموجي عادي بدلها؟",
+                        "تلكرام ما يخلي الإيموجي المتحرك تنزل بالقناة حتى بالنسخ أو التعديل بعد النشر، فحذفت المنشور من القناة. تنشره بإيموجي عادي بدلها؟",
                         reply_markup=M([[B("نشر بإيموجي عادي", callback_data="n:pubgoplain"), B("❌ إلغاء", callback_data="n:pubcancel")]]))
                     return
                 ctx.user_data.pop("pub", None)
@@ -562,6 +567,10 @@ async def pub_buttons(update: Update, ctx, parts):
             if act == "pubgo" and has_ce and not _kept_ce(res):
                 logging.warning("custom emoji dropped silently in channel post")
                 ids = [r.message_id for r in res]
+                ed = await _try_edit_emoji(ctx.bot, chat, ids[0], pub)
+                if ed:
+                    await q.message.reply_text("✅ اننشر بالقناة، وتعديل الوصف بعد النشر خلّى الإيموجي المتحرك تظهر (تأكدت من رد تلكرام).")
+                    return
                 ctx.user_data["lastpost"] = (chat, ids)
                 await q.message.reply_text(
                     "اننشر بالقناة، لكن تلكرام تجاهل الإيموجي المتحرك ونزلت عادية. السبب: البوتات ما تقدر ترسل إيموجي متحرك بالقنوات (حتى لو عندك Premium). تحذف هذا المنشور؟",
@@ -597,6 +606,20 @@ def _kept_ce(res):
         first = res[0]
         return any(getattr(e, "type", None) == "custom_emoji" for e in (first.caption_entities or []))
     except Exception:
+        return False
+
+
+async def _try_edit_emoji(bot, chat, first_id, pub):
+    """Edit the posted caption with the custom emoji entities. True only if the returned message still has them."""
+    try:
+        r = await bot.edit_message_caption(
+            chat_id=chat, message_id=first_id, caption=pub["cap"],
+            caption_entities=[MessageEntity.de_json(d, bot) for d in pub["ents"]])
+        if r is True:
+            return None  # edited, but Telegram returned no message to check
+        return _kept_ce([r])
+    except Exception as e:
+        logging.warning("edit with custom emoji failed: %s", str(e)[:100])
         return False
 
 
