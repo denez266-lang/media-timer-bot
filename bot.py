@@ -394,11 +394,13 @@ async def link_buttons(update: Update, ctx, parts):
     act = parts[1]
     if act == "new":
         ctx.user_data["collect"] = []
+        ctx.user_data.pop("cmsg", None)
         await q.message.reply_text("أرسل الصور والفيديوهات اللي تريدها بهذا الرابط (واحد واحد أو مجموعة). بعدها اضغط إنهاء.",
                                    reply_markup=M([[B("✅ إنهاء وإنشاء الرابط", callback_data="n:done")],
                                                    [B("❌ إلغاء", callback_data="n:cancel")]]))
     elif act == "done":
         items = ctx.user_data.pop("collect", None)
+        ctx.user_data.pop("cmsg", None)
         if not items:
             await q.message.reply_text("ما أضفت أي ملف. ابدأ من جديد من 🔗 الروابط.")
             return
@@ -411,6 +413,7 @@ async def link_buttons(update: Update, ctx, parts):
         await q.message.reply_text(f"✅ تم إنشاء الرابط ({len(items)} ملف):\n{link_url(ctx, code)}\n\nأرسل اسم للرابط (مثلاً: فيديوهات الجمعة) عشان تعرفه بعدين.")
     elif act == "cancel":
         ctx.user_data.pop("collect", None)
+        ctx.user_data.pop("cmsg", None)
         await q.message.reply_text("أُلغيت.")
     elif act == "show":
         t, m = screen("link:" + parts[2], ctx)
@@ -467,13 +470,42 @@ async def collect_media(update: Update, ctx):
     if th:
         item["th"] = th
     col.append(item)
-    gid = m.media_group_id
-    if gid is not None:
-        if ctx.user_data.get("last_grp") == gid:
+    await update_counter(ctx, update.effective_chat.id, col)
+
+
+COUNTER_KB = None
+
+
+async def update_counter(ctx, chat_id, col):
+    """One counter message, edited in place as files are added (edits are spaced out to avoid Telegram flood limits)."""
+    ud = ctx.user_data
+    kb = M([[B("✅ إنهاء وإنشاء الرابط", callback_data="n:done")]])
+    if not ud.get("cmsg"):
+        sent = await ctx.bot.send_message(chat_id, f"➕ أضفت ({len(col)})", reply_markup=kb)
+        ud["cmsg"] = sent.message_id
+        ud["cshown"] = len(col)
+        ud["clast"] = time.time()
+        return
+    if ud.get("cpend"):
+        return
+
+    async def push():
+        wait = 0.8 - (time.time() - ud.get("clast", 0))
+        if wait > 0:
+            await asyncio.sleep(wait)
+        ud["cpend"] = False
+        n = len(ud.get("collect") or [])
+        if not ud.get("cmsg") or n == ud.get("cshown"):
             return
-        ctx.user_data["last_grp"] = gid
-    await update.message.reply_text(f"➕ أضفت ({len(col)}){' (ألبوم، كل صوره تنضاف)' if gid is not None else ''}",
-                                    reply_markup=M([[B("✅ إنهاء وإنشاء الرابط", callback_data="n:done")]]))
+        try:
+            await ctx.bot.edit_message_text(f"➕ أضفت ({n})", chat_id=chat_id, message_id=ud["cmsg"], reply_markup=kb)
+            ud["cshown"] = n
+        except TelegramError as e:
+            logging.warning("counter edit: %s", e)
+        ud["clast"] = time.time()
+
+    ud["cpend"] = True
+    asyncio.create_task(push())
 
 
 async def backup_loop(app):
