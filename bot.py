@@ -75,7 +75,8 @@ def back(to="main"):
 
 
 def fmt_ts(ts):
-    return datetime.datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")
+    tz = datetime.timezone(datetime.timedelta(hours=3))  # Baghdad
+    return datetime.datetime.fromtimestamp(ts, tz).strftime("%m-%d %H:%M")
 
 
 # ---------------- gate (runs before every handler) ----------------
@@ -113,7 +114,12 @@ async def gate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             inviter = int(msg.text.split("ref", 1)[1])
         except ValueError:
             pass
-    new = store.touch_user(user.id, user.full_name, user.username or "", inviter if inviter != user.id else None)
+    src = None
+    if msg and msg.text and msg.text.startswith("/start ") and not msg.text.startswith("/start ref"):
+        c0 = msg.text.split(" ", 1)[1].strip().partition("_")[0]
+        if c0 and store.get_link(c0):
+            src = c0
+    new = store.touch_user(user.id, user.full_name, user.username or "", inviter if inviter != user.id else None, src)
     if new:
         store.log("join", user.id, user.full_name)
         if store.on("notify_join"):
@@ -356,6 +362,10 @@ async def open_link(update: Update, ctx, code, inviter=None):
     user = update.effective_user
     chat_id = update.effective_chat.id
     need = store.link_meta(code)["need"]
+    if not is_admin(user):
+        locked_now = need > 0 and store.invite_count(code, user.id) < need
+        store.add_visit(code, user.id, inviter if inviter and inviter != user.id else None, locked_now,
+                        store.user_src(user.id) == code and store.q("SELECT COUNT(*) FROM link_visits WHERE code=? AND uid=?", (code, user.id), one=True)[0] == 0)
     if inviter and inviter != user.id and need > 0:
         if store.add_invite(code, inviter, user.id):
             have = store.invite_count(code, inviter)
@@ -410,11 +420,29 @@ async def link_buttons(update: Update, ctx, parts):
         store.log("link_new", update.effective_user.id, code)
         ctx.user_data["await"] = "lname:" + code
         ctx.user_data["newlink"] = code
-        await q.message.reply_text(f"✅ تم إنشاء الرابط ({len(items)} ملف):\n{link_url(ctx, code)}\n\nأرسل اسم للرابط (مثلاً: فيديوهات الجمعة) عشان تعرفه بعدين.")
+        await q.message.reply_text(f"✅ تم إنشاء الرابط ({len(items)} ملف):\n{link_url(ctx, code)}\n\nأرسل اسم للرابط (مثلاً: فيديوهات الجمعة) عشان تعرفه بعدين، أو اضغط تخطي ويسميه رقم تلقائي.",
+                                   reply_markup=M([[B("⏭ تخطي (ترقيم تلقائي)", callback_data=f"n:skip:{code}")]]))
     elif act == "cancel":
         ctx.user_data.pop("collect", None)
         ctx.user_data.pop("cmsg", None)
         await q.message.reply_text("أُلغيت.")
+    elif act == "skip":
+        code = parts[2]
+        if not store.link_meta(code):
+            return
+        if ctx.user_data.get("newlink") == code:
+            ctx.user_data.pop("newlink", None)
+            store.update_link(code, "name", f"رابط {store.link_seq(code) or code}")
+            ctx.user_data["await"] = "lneed:" + code
+            await q.message.reply_text(f"✔️ سميته «رابط {store.link_seq(code) or code}».\n\nكم شخص لازم يدعو المستخدم حتى يفتح الصور والفيديوهات؟ أرسل رقم (0 = بدون قفل، تنفتح مباشرة):")
+        else:
+            await q.message.reply_text("هذا الرابط مسمّى من قبل.")
+    elif act == "stats":
+        t, m = screen("lstats:" + parts[2], ctx)
+        await edit(q, t, m)
+    elif act == "vis":
+        t, m = screen(f"lvis:{parts[2]}:{parts[3]}", ctx)
+        await edit(q, t, m)
     elif act == "page":
         ctx.user_data["lpage"] = int(parts[2])
         t, m = screen("links", ctx)
@@ -429,7 +457,7 @@ async def link_buttons(update: Update, ctx, parts):
         await edit(q, t, m)
     elif act == "show":
         t, m = screen("link:" + parts[2], ctx)
-        await q.message.reply_text(t, reply_markup=m)
+        await edit(q, t, m)
     elif act == "prot":
         store.update_link(parts[2], "protect", 0 if store.link_meta(parts[2])["protect"] else 1)
         t, m = screen("link:" + parts[2], ctx)
@@ -603,15 +631,21 @@ def screen(name, ctx):
         q_ = (ctx.user_data.get("lq") or "").strip().lower()
         if q_:
             ls = [x for x in ls if q_ in (x[1] or x[0]).lower()]
-        per = 8
+        per = 16
         pages = max(1, -(-len(ls) // per))
         pg = min(max(int(ctx.user_data.get("lpage") or 0), 0), pages - 1)
         ctx.user_data["lpage"] = pg
         rows = [[B("➕ إنشاء رابط جديد", callback_data="n:new"), B("🔎 بحث بالاسم", callback_data="n:search")]]
         if q_:
             rows.append([B(f"❌ مسح البحث: {q_[:20]}", callback_data="n:clearq")])
+        cur = []
         for c, nm, n, v in ls[pg * per:(pg + 1) * per]:
-            rows.append([B(f"🔗 {(nm or c)[:40]} · {n} ملف · {v} 👁", callback_data=f"n:show:{c}")])
+            cur.append(B(f"🔗 {(nm or c)[:18]} · {v}👁", callback_data=f"n:show:{c}"))
+            if len(cur) == 2:
+                rows.append(cur)
+                cur = []
+        if cur:
+            rows.append(cur)
         if pages > 1:
             nav = []
             if pg > 0:
@@ -625,6 +659,55 @@ def screen(name, ctx):
         if not ls:
             head += "\n\nما كو روابط" + (" بهذا الاسم." if q_ else ".")
         return head + "\n\nاضغط على رابط لعرضه وتعديل إعداداته.", M(rows)
+    if name.startswith("lstats:"):
+        c = name[7:]
+        meta = s.link_meta(c)
+        if not meta:
+            return "الرابط غير موجود.", M([back("links")])
+        d = s.link_stats(c, meta["need"])
+        lines = [f"📊 إحصائيات: {meta['name'] or c}", "",
+                 f"👁 مرات الفتح: {d['opens']}",
+                 f"👤 أشخاص مختلفين دخلوا: {d['people']}",
+                 f"🔁 رجعوا أكثر من مرة: {d['repeat']}",
+                 f"🆕 مستخدمين جدد للبوت دخلوا من هذا الرابط: {d['new_users']}",
+                 f"📦 مرات استلام المحتوى الحقيقي: {meta['views']}"]
+        if meta["need"] > 0:
+            lines += ["", f"🔒 شافوا المغبش (مقفول عليهم): {d['locked']}",
+                      f"🔓 أكملوا {meta['need']} دعوات وانفتح لهم: {d['unlocked']}",
+                      f"🤝 دخلوا عن طريق رابط دعوة شخصي: {d['via_invite']}",
+                      f"👥 مجموع الدعوات المسجلة: {d['invites']} (من {d['inviters']} شخص)"]
+        if d["first"]:
+            lines += ["", f"أول دخول: {fmt_ts(d['first'])}", f"آخر دخول: {fmt_ts(d['last'])}"]
+        if d["days"]:
+            lines += ["", "آخر الأيام (فتح / أشخاص):"] + [f"• {dd}: {o} / {p}" for dd, o, p in d["days"]]
+        if d["top"]:
+            lines += ["", "🏆 أكثر من دعا:"]
+            for uid_, nm, un, cnt in d["top"]:
+                lines.append(f"• {nm or uid_}{(' @' + un) if un else ''}: {cnt}")
+        lines += ["", "(الإحصائيات تُحسب من تاريخ تفعيل هذه الميزة، ودخولك كأدمن ما ينحسب)"]
+        return "\n".join(lines), M([[B("👥 من دخل", callback_data=f"n:vis:{c}:0")], [B("‹ الرابط", callback_data=f"n:show:{c}")]])
+    if name.startswith("lvis:"):
+        _, c, pg = name.split(":")
+        meta = s.link_meta(c)
+        if not meta:
+            return "الرابط غير موجود.", M([back("links")])
+        per = 10
+        total, rows_ = s.visits_page(c, per, int(pg) * per)
+        pages = max(1, -(-total // per))
+        lines = [f"👥 من دخل: {meta['name'] or c} ({total} دخول) - صفحة {int(pg) + 1}/{pages}", ""]
+        for ts, uid_, nm, un, isnew, inv, invname, locked in rows_:
+            tags = ("🆕 جديد" if isnew else "🔁 معروف") + (" · 🔒" if locked else " · 🔓")
+            via = f" · عبر {invname or inv}" if inv else " · مباشر"
+            lines.append(f"• {fmt_ts(ts)} {nm or uid_}{(' @' + un) if un else ''} [{uid_}] {tags}{via}")
+        if not rows_:
+            lines.append("ما كو دخول لحد الآن.")
+        nav = []
+        if int(pg) > 0:
+            nav.append(B("◀️", callback_data=f"n:vis:{c}:{int(pg) - 1}"))
+        if int(pg) < pages - 1:
+            nav.append(B("▶️", callback_data=f"n:vis:{c}:{int(pg) + 1}"))
+        kb = ([nav] if nav else []) + [[B("📊 الإحصائيات", callback_data=f"n:stats:{c}")], [B("‹ الرابط", callback_data=f"n:show:{c}")]]
+        return "\n".join(lines)[:4000], M(kb)
     if name.startswith("link:"):
         c = name[5:]
         meta = s.link_meta(c)
@@ -646,6 +729,7 @@ def screen(name, ctx):
             [B("💬 الرسالة بعد المحتوى", callback_data=f"n:msg:{c}"), B("🔐 رسالة القفل", callback_data=f"n:lock:{c}")],
             [B("👥 الدعوات المطلوبة", callback_data=f"n:need:{c}"), B("🌫 التغبيش", callback_data=f"n:blur:{c}")],
             [B(f"🔒 منع التوجيه/الحفظ {tick(meta['protect'])}", callback_data=f"n:prot:{c}")],
+            [B("📊 إحصائيات هذا الرابط", callback_data=f"n:stats:{c}"), B("👥 من دخل", callback_data=f"n:vis:{c}:0")],
             [B("♻️ نسخ الإعدادات الافتراضية لهذا الرابط فقط", callback_data=f"n:reset:{c}")],
             [B("🗑 حذف الرابط", callback_data=f"n:del:{c}")], back("links")])
     if name == "stats":
