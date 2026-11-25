@@ -818,6 +818,27 @@ async def text_router(update: Update, ctx):
     await admin_input(update, ctx)
 
 
+def _add_health_route():
+    """UptimeRobot keep-alive: GET / and HEAD / return 200 (PTB's webhook server only knows the token path)."""
+    import tornado.web
+    from telegram.ext._utils import webhookhandler as wh
+
+    class Health(tornado.web.RequestHandler):
+        def get(self):
+            self.write("ok")
+
+        def head(self):
+            self.set_status(200)
+
+    orig = wh.WebhookAppClass.__init__
+
+    def patched(self, *a, **k):
+        orig(self, *a, **k)
+        self.add_handlers(r".*", [(r"/", Health)])
+
+    wh.WebhookAppClass.__init__ = patched
+
+
 def main():
     app = Application.builder().token(TOKEN).post_init(post_init).build()
     app.add_handler(TypeHandler(Update, gate), group=-1)
@@ -831,6 +852,7 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.ANIMATION | filters.Document.ALL, collect_media))
     url = os.environ.get("RENDER_EXTERNAL_URL")
     if url:
+        _add_health_route()
         app.run_webhook(listen="0.0.0.0", port=int(os.environ.get("PORT", 10000)), url_path=TOKEN,
                         webhook_url=f"{url}/{TOKEN}")
     else:
