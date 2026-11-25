@@ -32,7 +32,7 @@ class Store:
         self.q("CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT)")
         self.q("CREATE TABLE IF NOT EXISTS channels(id INTEGER PRIMARY KEY AUTOINCREMENT, ref TEXT UNIQUE, enabled INTEGER DEFAULT 1)")
         self.q("CREATE TABLE IF NOT EXISTS links(code TEXT PRIMARY KEY, items TEXT, created REAL, views INTEGER DEFAULT 0)")
-        for col, typ in (("name", "TEXT"), ("delay", "INTEGER"), ("note", "TEXT"), ("need", "INTEGER"), ("blur", "INTEGER")):
+        for col, typ in (("name", "TEXT"), ("delay", "INTEGER"), ("note", "TEXT"), ("need", "INTEGER"), ("blur", "INTEGER"), ("lock_msg", "TEXT"), ("protect", "INTEGER")):
             try:
                 self.q(f"ALTER TABLE links ADD COLUMN {col} {typ}")
             except sqlite3.OperationalError:
@@ -142,14 +142,30 @@ class Store:
 
     # links
     def add_link(self, code, items, name=""):
-        self.q("INSERT INTO links(code,items,created,name) VALUES(?,?,?,?)", (code, json.dumps(items), time.time(), name))
+        """New link copies the current defaults, so later changes to one link or to the defaults never touch another link."""
+        self.q("INSERT INTO links(code,items,created,name,delay,note,blur,lock_msg,protect) VALUES(?,?,?,?,?,?,?,?,?)",
+               (code, json.dumps(items), time.time(), name, int(self.get("delay") or 30), self.get("note"),
+                int(self.get("blur") or 3), self.get("lock_msg"), 1 if self.on("protect") else 0))
+
+    def reset_link(self, code):
+        self.q("UPDATE links SET delay=?,note=?,blur=?,lock_msg=?,protect=? WHERE code=?",
+               (int(self.get("delay") or 30), self.get("note"), int(self.get("blur") or 3), self.get("lock_msg"),
+                1 if self.on("protect") else 0, code))
+
+    def freeze_links(self):
+        """Old links that relied on the shared defaults get their own copy of the values now in effect."""
+        self.q("UPDATE links SET delay=? WHERE delay IS NULL", (int(self.get("delay") or 30),))
+        self.q("UPDATE links SET note=? WHERE note IS NULL", (self.get("note"),))
+        self.q("UPDATE links SET blur=? WHERE blur IS NULL", (int(self.get("blur") or 3),))
+        self.q("UPDATE links SET lock_msg=? WHERE lock_msg IS NULL", (self.get("lock_msg"),))
+        self.q("UPDATE links SET protect=? WHERE protect IS NULL", (1 if self.on("protect") else 0,))
 
     def link_meta(self, code):
-        r = self.q("SELECT name,delay,note,views,need,blur FROM links WHERE code=?", (code,), one=True)
-        return {"name": r[0] or "", "delay": r[1], "note": r[2], "views": r[3], "need": r[4] or 0, "blur": r[5]} if r else None
+        r = self.q("SELECT name,delay,note,views,need,blur,lock_msg,protect FROM links WHERE code=?", (code,), one=True)
+        return {"name": r[0] or "", "delay": r[1], "note": r[2], "views": r[3], "need": r[4] or 0, "blur": r[5], "lock_msg": r[6], "protect": bool(r[7])} if r else None
 
     def update_link(self, code, field, value):
-        assert field in ("name", "delay", "note", "need", "blur")
+        assert field in ("name", "delay", "note", "need", "blur", "lock_msg", "protect")
         self.q(f"UPDATE links SET {field}=? WHERE code=?", (value, code))
 
     def get_link(self, code):
