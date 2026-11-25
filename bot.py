@@ -45,6 +45,7 @@ def restore_db():
 
 restore_db()
 store = Store(DB_PATH)
+store.freeze_links()
 for c in SEED_CHANNELS:
     store.add_channel(c if c.startswith("@") else "@" + c)
 
@@ -306,9 +307,9 @@ async def make_blurs(bot, items, strength=None):
 async def deliver_to(bot, chat_id, uid, code):
     items, _v = store.get_link(code)
     meta = store.link_meta(code)
-    delay = int(meta["delay"] or store.get("delay"))
-    note_txt = meta["note"] or store.get("note")
-    protect = store.on("protect")
+    delay = int(meta["delay"] or 30)
+    note_txt = meta["note"] or ""
+    protect = meta["protect"]
     ids = []
     for it in items:
         fn = {"photo": bot.send_photo, "video": bot.send_video,
@@ -329,7 +330,7 @@ async def deliver_to(bot, chat_id, uid, code):
 
 async def send_locked(bot, chat_id, uid, code, need):
     items, _v = store.get_link(code)
-    strength = int(store.link_meta(code)["blur"] or store.get("blur") or 3)
+    strength = int(store.link_meta(code)["blur"] or 3)
     if any(it.get("bs") != strength for it in items):
         items = await make_blurs(bot, items, strength)
         store.set_items(code, items)
@@ -344,7 +345,7 @@ async def send_locked(bot, chat_id, uid, code, need):
     me = await bot.get_me()
     link = f"https://t.me/{me.username}?start={code}_{uid}"
     have = store.invite_count(code, uid)
-    text = store.get("lock_msg").replace("{n}", str(need)).replace("{have}", str(have)).replace("{link}", link)
+    text = (store.link_meta(code)["lock_msg"] or "").replace("{n}", str(need)).replace("{have}", str(have)).replace("{link}", link)
     share = "https://t.me/share/url?url=" + quote(link, safe="")
     await bot.send_message(chat_id, text, reply_markup=M([
         [B("📤 مشاركة رابطي", url=share)],
@@ -414,9 +415,16 @@ async def link_buttons(update: Update, ctx, parts):
     elif act == "show":
         t, m = screen("link:" + parts[2], ctx)
         await q.message.reply_text(t, reply_markup=m)
+    elif act == "prot":
+        store.update_link(parts[2], "protect", 0 if store.link_meta(parts[2])["protect"] else 1)
+        t, m = screen("link:" + parts[2], ctx)
+        await edit(q, t, m)
+    elif act == "lock":
+        ctx.user_data["await"] = "llock:" + parts[2]
+        await q.message.reply_text("أرسل رسالة القفل لهذا الرابط فقط. استخدم {n} للعدد المطلوب، {have} لما دعاه الشخص، {link} لرابطه الشخصي:\n(/cancel للإلغاء)")
     elif act == "blur":
         ctx.user_data["await"] = "lblur:" + parts[2]
-        await q.message.reply_text("أرسل قوة التغبيش لهذا الرابط من 1 (خفيف) إلى 10 (قوي). أرسل 0 لاستخدام الافتراضي:\n(/cancel للإلغاء)")
+        await q.message.reply_text("أرسل قوة التغبيش لهذا الرابط من 1 (خفيف) إلى 10 (قوي).\n(/cancel للإلغاء)")
     elif act == "need":
         ctx.user_data["await"] = "lneed:" + parts[2]
         await q.message.reply_text("كم شخص لازم يدعو المستخدم حتى يفتح المحتوى؟ أرسل رقم (0 = بدون قفل):\n(/cancel للإلغاء)")
@@ -427,8 +435,7 @@ async def link_buttons(update: Update, ctx, parts):
                   "msg": "أرسل الرسالة اللي تظهر بعد المحتوى لهذا الرابط. استخدم {s} مكان مدة الحذف:"}[act]
         await q.message.reply_text(prompt + "\n(/cancel للإلغاء)")
     elif act == "reset":
-        store.update_link(parts[2], "delay", None)
-        store.update_link(parts[2], "note", None)
+        store.reset_link(parts[2])
         t, m = screen("link:" + parts[2], ctx)
         await edit(q, t, m)
     elif act == "del":
@@ -513,7 +520,7 @@ def screen(name, ctx):
     if name == "main":
         rows = [
             [B("🔗 الروابط والمحتوى", callback_data="a:links")],
-            [B("📝 المحتوى", callback_data="a:content"), B("⚙️ الإعدادات", callback_data="a:settings")],
+            [B("📝 المحتوى", callback_data="a:content"), B("⚙️ الإعدادات\n\nالمدة والرسالة والتغبيش والقفل والحماية هنا هي قيم أولية للروابط الجديدة فقط. تتنسخ لكل رابط عند إنشائه، وتغييرها ما يغيّر الروابط الموجودة. كل رابط يتعدل لحاله من 🔗 الروابط.", callback_data="a:settings")],
             [B("🔐 الاشتراك", callback_data="a:sub"), B("👥 المستخدمون", callback_data="a:users")],
             [B("📢 التواصل", callback_data="a:comm")],
             [B("🆘 الإبلاغ عن مشكلة", callback_data="a:report"), B("🛠 النظام والدعم", callback_data="a:sys")],
@@ -525,14 +532,14 @@ def screen(name, ctx):
         return f"📝 المحتوى\n\nرسالة الترحيب الحالية:\n{s.get('welcome')}", M([
             [B("✏️ تعديل رسالة الترحيب", callback_data="w:welcome")], back()])
     if name == "settings":
-        return "⚙️ الإعدادات", M([
+        return "⚙️ الإعدادات\n\nالمدة والرسالة والتغبيش والقفل والحماية هنا هي قيم أولية للروابط الجديدة فقط. تتنسخ لكل رابط عند إنشائه، وتغييرها ما يغيّر الروابط الموجودة. كل رابط يتعدل لحاله من 🔗 الروابط.", M([
             [B(f"🛠 وضع الصيانة {tick(s.on('maintenance'))}", callback_data="t:maintenance:settings")],
             [B(f"🔐 الاشتراك الإجباري {tick(s.on('gate_on'))}", callback_data="t:gate_on:settings")],
-            [B(f"⏱ المدة الافتراضية: {fmt_dur(s.get('delay'))}", callback_data="w:delay")],
-            [B(f"🔒 حماية المحتوى (منع التوجيه/الحفظ) {tick(s.on('protect'))}", callback_data="t:protect:settings")],
-            [B("✏️ رسالة التنبيه", callback_data="w:note")],
-            [B(f"🌫 قوة التغبيش: {s.get('blur')} (1-10)", callback_data="w:blur")],
-            [B("🔐 رسالة القفل", callback_data="w:lock_msg")], back()])
+            [B(f"⏱ المدة للروابط الجديدة: {fmt_dur(s.get('delay'))}", callback_data="w:delay")],
+            [B(f"🔒 حماية المحتوى للروابط الجديدة {tick(s.on('protect'))}", callback_data="t:protect:settings")],
+            [B("✏️ رسالة التنبيه (للروابط الجديدة)", callback_data="w:note")],
+            [B(f"🌫 التغبيش للروابط الجديدة: {s.get('blur')} (1-10)", callback_data="w:blur")],
+            [B("🔐 رسالة القفل (للروابط الجديدة)", callback_data="w:lock_msg")], back()])
     if name == "users":
         return "👥 المستخدمون\n\nإدارة المستخدمين والأدمنية", M([
             [B("📊 الإحصائيات", callback_data="a:stats"), B("👤 المسؤولون", callback_data="a:admins")],
@@ -552,18 +559,22 @@ def screen(name, ctx):
         if not meta:
             return "الرابط غير موجود.", M([back("links")])
         got = s.get_link(c)
-        d = meta["delay"] or int(s.get("delay"))
-        dtxt = fmt_dur(d) + ("" if meta["delay"] else " (الافتراضي)")
-        ntxt = (meta["note"] or s.get("note")).replace("{s}", fmt_dur(d)) + ("" if meta["note"] else "\n(الافتراضية)")
+        d = meta["delay"] or 30
         txt = (f"🔗 {meta['name'] or c}\n\nالرابط:\nhttps://t.me/{ctx.bot.username}?start={c}\n\n"
                f"الملفات: {len(got[0])} | المشاهدات: {meta['views']}\n"
+               f"(كل الإعدادات تحت خاصة بهذا الرابط فقط)\n"
                f"👥 الدعوات المطلوبة: {meta['need'] or 'بدون قفل'} (دعوات مسجلة: {s.invite_total(c)})\n"
-               f"🌫 قوة التغبيش: {meta['blur'] or (str(s.get('blur')) + ' (الافتراضي)')}\n"
-               f"مدة الحذف: {dtxt}\nالرسالة:\n{ntxt}")
+               f"🌫 قوة التغبيش: {meta['blur']}\n"
+               f"⏱ مدة الحذف: {fmt_dur(d)}\n"
+               f"🔒 منع التوجيه/الحفظ: {'مفعّل' if meta['protect'] else 'متوقف'}\n\n"
+               f"💬 الرسالة بعد المحتوى:\n{(meta['note'] or '').replace('{s}', fmt_dur(d))}\n\n"
+               f"🔐 رسالة القفل:\n{meta['lock_msg']}")
         return txt, M([
             [B("✏️ الاسم", callback_data=f"n:name:{c}"), B("⏱ المدة", callback_data=f"n:time:{c}")],
-            [B("💬 الرسالة", callback_data=f"n:msg:{c}"), B("♻️ رجّع الرسالة/المدة للافتراضي", callback_data=f"n:reset:{c}")],
+            [B("💬 الرسالة بعد المحتوى", callback_data=f"n:msg:{c}"), B("🔐 رسالة القفل", callback_data=f"n:lock:{c}")],
             [B("👥 الدعوات المطلوبة", callback_data=f"n:need:{c}"), B("🌫 التغبيش", callback_data=f"n:blur:{c}")],
+            [B(f"🔒 منع التوجيه/الحفظ {tick(meta['protect'])}", callback_data=f"n:prot:{c}")],
+            [B("♻️ نسخ الإعدادات الافتراضية لهذا الرابط فقط", callback_data=f"n:reset:{c}")],
             [B("🗑 حذف الرابط", callback_data=f"n:del:{c}")], back("links")])
     if name == "stats":
         total, day, active, banned = s.stats()
@@ -643,7 +654,7 @@ PROMPTS = {
     "ban": "أرسل ID المستخدم للحظر:", "unban": "أرسل ID المستخدم لفك الحظر:",
     "channel_add": "أرسل يوزر القناة مثل @name (وأضف البوت أدمن فيها):",
     "broadcast": "أرسل نص الرسالة الجماعية:",
-    "blur": "أرسل قوة التغبيش من 1 (خفيف) إلى 10 (قوي). الافتراضي للروابط اللي ما إلها تغبيش خاص:",
+    "blur": "أرسل قوة التغبيش من 1 (خفيف) إلى 10 (قوي). قيمة أولية للروابط الجديدة فقط:",
     "lock_msg": "أرسل رسالة القفل. استخدم {n} للعدد المطلوب، {have} لما دعاه، {link} لرابطه الشخصي:",
     "delay": "أرسل مدة الحذف الافتراضية. مثال: 30 أو 2 دقيقة:",
     "note": "أرسل نص رسالة التنبيه. استخدم {s} مكان عدد الثواني:",
@@ -719,17 +730,19 @@ async def admin_input(update: Update, ctx) -> bool:
     text = update.message.text.strip()
     s = store
     uid = update.effective_user.id
-    if key.startswith(("lname:", "ldelay:", "lnote:", "lneed:", "lblur:")):
+    if key.startswith(("lname:", "ldelay:", "lnote:", "lneed:", "lblur:", "llock:")):
         kind, code = key.split(":", 1)
         if not s.link_meta(code):
             await update.message.reply_text("الرابط غير موجود.")
             return True
-        if kind == "lblur":
-            if not text.isdigit() or int(text) > 10:
+        if kind == "llock":
+            s.update_link(code, "lock_msg", text)
+        elif kind == "lblur":
+            if not text.isdigit() or not 1 <= int(text) <= 10:
                 ctx.user_data["await"] = key
-                await update.message.reply_text("رقم من 1 إلى 10 (أو 0 للافتراضي).")
+                await update.message.reply_text("رقم من 1 إلى 10.")
                 return True
-            s.update_link(code, "blur", int(text) or None)
+            s.update_link(code, "blur", int(text))
         elif kind == "lneed":
             if not text.isdigit() or int(text) > 1000:
                 ctx.user_data["await"] = key
@@ -764,7 +777,7 @@ async def admin_input(update: Update, ctx) -> bool:
     if key == "blur":
         if text.isdigit() and 1 <= int(text) <= 10:
             s.set("blur", text)
-            await update.message.reply_text("✔️ تم. هذا الافتراضي للروابط اللي ما إلها تغبيش خاص.")
+            await update.message.reply_text("✔️ تم. تنطبق على الروابط الجديدة فقط.")
         else:
             await update.message.reply_text("رقم من 1 إلى 10.")
         return True
