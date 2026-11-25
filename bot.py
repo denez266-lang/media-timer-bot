@@ -527,6 +527,35 @@ async def pub_buttons(update: Update, ctx, parts):
         use = [d for d in ents_all if d.get("type") != "custom_emoji"] if act == "pubgoplain" else ents_all
         try:
             chat = int(ref) if ref.lstrip("-").isdigit() else ref
+            if act == "pubgo" and has_ce and pub.get("prev_ids"):
+                # A bot can't post custom emoji into a channel itself, but a copy of the album it already sent
+                # to the admin keeps the original entities. Copy it, then check the copy kept the emoji.
+                mids = await ctx.bot.copy_messages(chat, pub["prev_chat"], pub["prev_ids"])
+                new_ids = [x.message_id for x in mids]
+                kept = None
+                try:
+                    fw = await ctx.bot.forward_messages(pub["prev_chat"], chat, new_ids)
+                    kept = _kept_ce(fw)
+                    try:
+                        await ctx.bot.delete_messages(pub["prev_chat"], [x.message_id for x in fw])
+                    except Exception:
+                        pass
+                except Exception as e3:
+                    logging.warning("copy check failed: %s", e3)
+                store.log("channel_post", update.effective_user.id, pub["code"])
+                if kept is False:
+                    logging.warning("custom emoji dropped in copied channel post")
+                    try:
+                        await ctx.bot.delete_messages(chat, new_ids)
+                    except Exception:
+                        pass
+                    await q.message.reply_text(
+                        "تلكرام ما يخلي الإيموجي المتحرك تنزل بالقناة حتى بالنسخ، فحذفت المنشور من القناة. تنشره بإيموجي عادي بدلها؟",
+                        reply_markup=M([[B("نشر بإيموجي عادي", callback_data="n:pubgoplain"), B("❌ إلغاء", callback_data="n:pubcancel")]]))
+                    return
+                ctx.user_data.pop("pub", None)
+                await q.message.reply_text("✅ اننشر بالقناة (نسخة من المعاينة)." + (" الإيموجي المتحرك تأكدت إنها بقيت." if kept else " ما كدرت أتأكد من الإيموجي المتحرك، شوف المنشور."))
+                return
             res = await ctx.bot.send_media_group(chat, _pub_media(ctx.bot, pub, pub["cap"], use))
             store.log("channel_post", update.effective_user.id, pub["code"])
             ctx.user_data.pop("pub", None)
@@ -583,11 +612,14 @@ async def pub_preview(update, ctx, text, ents):
     pub["cap"], pub["ents"] = cap, ents2
     has_ce = any(e.get("type") == "custom_emoji" for e in ents2)
     pub["plain"] = False
+    pub["prev_ids"] = None
     note = ""
     try:
         res = await ctx.bot.send_media_group(update.effective_chat.id, _pub_media(ctx.bot, pub, cap, ents2))
         if has_ce:
             if _kept_ce(res):
+                pub["prev_ids"] = [r.message_id for r in res]
+                pub["prev_chat"] = update.effective_chat.id
                 note = "\n✅ الإيموجي المتحرك قبلها تلكرام بالمعاينة (بالقناة قد يختلف)."
             else:
                 note = "\n⚠️ تلكرام تجاهل الإيموجي المتحرك بالمعاينة وعرضها عادية (البوت ما يقدر يرسلها)."
