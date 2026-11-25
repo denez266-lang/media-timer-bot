@@ -1,0 +1,168 @@
+import sqlite3, threading, time, json
+
+DEFAULTS = {
+    "welcome": "أهلاً! استخدم رابط دعوة صالح لاستلام المحتوى.",
+    "delay": "30",
+    "protect": "0",
+    "note": "⏳ ستنحذف هذه الرسائل بعد {s} ثانية.\nأعد توجيهها أو احفظها قبل الحذف.",
+    "deleted_note": "🗑 تم حذف المحتوى.",
+    "maintenance": "0",
+    "notify_join": "1",
+    "ban_notice": "1",
+    "ban_msg": "🚫 تم حظرك من استخدام البوت.",
+    "gate_on": "1",
+    "gate_notify": "1",
+    "gate_button": "1",
+    "gate_msg": "🔐 للاستمرار لازم تشترك بالقنوات التالية أول، وبعدها اضغط تحقق.",
+    "support": "للتواصل مع الدعم راسل الأدمن.",
+    "report_url": "",
+}
+
+
+class Store:
+    def __init__(self, path):
+        self.db = sqlite3.connect(path, check_same_thread=False)
+        self.lock = threading.Lock()
+        self.dirty = False
+        self.q("""CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, name TEXT, username TEXT,
+                  joined REAL, last_seen REAL, banned INTEGER DEFAULT 0, inviter INTEGER)""")
+        self.q("CREATE TABLE IF NOT EXISTS admins(id INTEGER PRIMARY KEY)")
+        self.q("CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT)")
+        self.q("CREATE TABLE IF NOT EXISTS channels(id INTEGER PRIMARY KEY AUTOINCREMENT, ref TEXT UNIQUE, enabled INTEGER DEFAULT 1)")
+        self.q("CREATE TABLE IF NOT EXISTS links(code TEXT PRIMARY KEY, items TEXT, created REAL, views INTEGER DEFAULT 0)")
+        self.q("CREATE TABLE IF NOT EXISTS pending(id INTEGER PRIMARY KEY AUTOINCREMENT, chat INTEGER, ids TEXT, at REAL)")
+        self.q("CREATE TABLE IF NOT EXISTS log(ts REAL, kind TEXT, uid INTEGER, text TEXT)")
+
+    def q(self, sql, args=(), one=False, many=False):
+        with self.lock:
+            cur = self.db.execute(sql, args)
+            self.db.commit()
+            if not sql.lstrip().upper().startswith("SELECT"):
+                self.dirty = True
+            if one:
+                return cur.fetchone()
+            if many:
+                return cur.fetchall()
+            return None
+
+    # settings
+    def get(self, k):
+        r = self.q("SELECT v FROM settings WHERE k=?", (k,), one=True)
+        return r[0] if r else DEFAULTS.get(k, "")
+
+    def set(self, k, v):
+        self.q("INSERT INTO settings(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, v))
+
+    def on(self, k):
+        return self.get(k) == "1"
+
+    def toggle(self, k):
+        self.set(k, "0" if self.on(k) else "1")
+
+    # users
+    def touch_user(self, uid, name, username, inviter=None):
+        """Returns True if the user is new."""
+        r = self.q("SELECT id FROM users WHERE id=?", (uid,), one=True)
+        now = time.time()
+        if r:
+            self.q("UPDATE users SET name=?, username=?, last_seen=? WHERE id=?", (name, username, now, uid))
+            return False
+        self.q("INSERT INTO users(id,name,username,joined,last_seen,inviter) VALUES(?,?,?,?,?,?)",
+               (uid, name, username, now, now, inviter))
+        return True
+
+    def all_user_ids(self, include_banned=False):
+        sql = "SELECT id FROM users" + ("" if include_banned else " WHERE banned=0")
+        return [r[0] for r in self.q(sql, many=True)]
+
+    def is_banned(self, uid):
+        r = self.q("SELECT banned FROM users WHERE id=?", (uid,), one=True)
+        return bool(r and r[0])
+
+    def set_ban(self, uid, flag):
+        r = self.q("SELECT id FROM users WHERE id=?", (uid,), one=True)
+        if not r:
+            self.q("INSERT INTO users(id,name,username,joined,last_seen) VALUES(?,?,?,?,?)",
+                   (uid, "", "", time.time(), time.time()))
+        self.q("UPDATE users SET banned=? WHERE id=?", (1 if flag else 0, uid))
+
+    def banned_list(self):
+        return self.q("SELECT id,name,username FROM users WHERE banned=1", many=True)
+
+    def stats(self):
+        total = self.q("SELECT COUNT(*) FROM users", one=True)[0]
+        day = self.q("SELECT COUNT(*) FROM users WHERE joined>?", (time.time() - 86400,), one=True)[0]
+        active = self.q("SELECT COUNT(*) FROM users WHERE last_seen>?", (time.time() - 86400,), one=True)[0]
+        banned = self.q("SELECT COUNT(*) FROM users WHERE banned=1", one=True)[0]
+        return total, day, active, banned
+
+    def invited_count(self, uid):
+        return self.q("SELECT COUNT(*) FROM users WHERE inviter=?", (uid,), one=True)[0]
+
+    # admins
+    def admins(self):
+        return [r[0] for r in self.q("SELECT id FROM admins", many=True)]
+
+    def add_admin(self, uid):
+        self.q("INSERT OR IGNORE INTO admins(id) VALUES(?)", (uid,))
+
+    def del_admin(self, uid):
+        self.q("DELETE FROM admins WHERE id=?", (uid,))
+
+    # channels
+    def channels(self):
+        return self.q("SELECT id,ref,enabled FROM channels ORDER BY id", many=True)
+
+    def add_channel(self, ref):
+        self.q("INSERT OR IGNORE INTO channels(ref,enabled) VALUES(?,1)", (ref,))
+
+    def toggle_channel(self, cid):
+        self.q("UPDATE channels SET enabled=1-enabled WHERE id=?", (cid,))
+
+    def del_channel(self, cid):
+        self.q("DELETE FROM channels WHERE id=?", (cid,))
+
+    def set_all_channels(self, flag):
+        self.q("UPDATE channels SET enabled=?", (1 if flag else 0,))
+
+    # log
+    def log(self, kind, uid, text=""):
+        self.q("INSERT INTO log(ts,kind,uid,text) VALUES(?,?,?,?)", (time.time(), kind, uid, text[:200]))
+
+    def recent_log(self, n=20):
+        return self.q("SELECT ts,kind,uid,text FROM log ORDER BY ts DESC LIMIT ?", (n,), many=True)
+
+    # links
+    def add_link(self, code, items):
+        self.q("INSERT INTO links(code,items,created) VALUES(?,?,?)", (code, json.dumps(items), time.time()))
+
+    def get_link(self, code):
+        r = self.q("SELECT items,views FROM links WHERE code=?", (code,), one=True)
+        return (json.loads(r[0]), r[1]) if r else None
+
+    def links(self):
+        return [(c, len(json.loads(i)), v) for c, i, v in self.q("SELECT code,items,views FROM links ORDER BY created", many=True)]
+
+    def del_link(self, code):
+        self.q("DELETE FROM links WHERE code=?", (code,))
+
+    def inc_views(self, code):
+        self.q("UPDATE links SET views=views+1 WHERE code=?", (code,))
+
+    # pending deletions
+    def add_pending(self, chat, ids, at):
+        self.q("INSERT INTO pending(chat,ids,at) VALUES(?,?,?)", (chat, json.dumps(ids), at))
+
+    def del_pending(self, chat, ids):
+        self.q("DELETE FROM pending WHERE chat=? AND ids=?", (chat, json.dumps(ids)))
+
+    def pending(self):
+        return [(c, json.loads(i), a) for c, i, a in self.q("SELECT chat,ids,at FROM pending", many=True)]
+
+    # backup
+    def snapshot(self, path):
+        with self.lock:
+            dst = sqlite3.connect(path)
+            self.db.backup(dst)
+            dst.close()
+            self.dirty = False
