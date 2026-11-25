@@ -232,7 +232,10 @@ def link_url(ctx, code):
     return f"https://t.me/{ctx.bot.username}?start={code}"
 
 
-async def delete_later(bot, chat_id, ids, at):
+ACTIVE = set()
+
+
+async def delete_later(bot, chat_id, ids, at, code=None):
     await asyncio.sleep(max(0, at - time.time()))
     for i in ids:
         try:
@@ -240,6 +243,13 @@ async def delete_later(bot, chat_id, ids, at):
         except TelegramError:
             pass
     store.del_pending(chat_id, ids)
+    if code:
+        ACTIVE.discard((chat_id, code))
+        try:
+            await bot.send_message(chat_id, "انحذف المحتوى. تريد نرسله لك مرة ثانية؟",
+                                   reply_markup=M([[B("🔁 إعادة الإرسال", callback_data=f"u:again:{code}")]]))
+        except TelegramError as e:
+            logging.warning("resend prompt failed: %s", e)
 
 
 def fmt_clock(sec):
@@ -361,7 +371,8 @@ async def deliver_to(bot, chat_id, uid, code):
     store.add_pending(chat_id, ids, at)
     store.inc_views(code)
     store.log("view", uid, code)
-    asyncio.create_task(delete_later(bot, chat_id, ids, at))
+    ACTIVE.add((chat_id, code))
+    asyncio.create_task(delete_later(bot, chat_id, ids, at, code))
 
 
 async def send_locked(bot, chat_id, uid, code, need):
@@ -424,6 +435,18 @@ async def user_cb(update: Update, ctx):
     have = store.invite_count(code, uid)
     if meta["need"] > 0 and have < meta["need"] and not is_admin(q.from_user):
         await q.answer(f"دعوت {have} من {meta['need']}. لسه ناقص {meta['need'] - have}.", show_alert=True)
+        return
+    if act == "again":
+        if (q.message.chat_id, code) in ACTIVE:
+            await q.answer("المحتوى لسه موجود.")
+            return
+        ACTIVE.add((q.message.chat_id, code))
+        await q.answer("✅ ينرسل")
+        try:
+            await q.message.delete()
+        except TelegramError:
+            pass
+        await deliver_to(ctx.bot, q.message.chat_id, uid, code)
         return
     await q.answer("✅ انفتح")
     await deliver_to(ctx.bot, q.message.chat_id, uid, code)
