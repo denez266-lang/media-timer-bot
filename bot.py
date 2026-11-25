@@ -596,7 +596,7 @@ async def _ask_cap(msg, ctx):
 
 async def _pub_ask_media(msg):
     await msg.reply_text(
-        "أرسل الصور (أو فيديو) الي تريدها بالمنشور، 2 أو أكثر، حتى 10. تكدر ترسلها ألبوم أو وحدة وحدة. بعدها اضغط ✅ تم.",
+        "أرسل الصور (أو فيديو) الي تريدها بالمنشور، 2 أو أكثر، حتى 10. تكدر ترسلها ألبوم أو وحدة وحدة، أو تحوّلها من رسائلك المحفوظة أو قناتك (أخذ أول سطر من وصفها فقط، ويضاف وصفك الثابت تحته). بعدها اضغط ✅ تم.",
         reply_markup=M([[B("✅ تم", callback_data="n:pubdone"), B("❌ إلغاء", callback_data="n:pubcancel")]]))
 
 
@@ -623,11 +623,56 @@ async def _try_edit_emoji(bot, chat, first_id, pub):
         return False
 
 
+def _fwd_own(m):
+    """True if the message is not a forward, or is a forward of the admin's own message / his own post channel."""
+    fo = getattr(m, "forward_origin", None)
+    if fo is None:
+        return True
+    t = getattr(fo, "type", None)
+    if t == "user":
+        u = getattr(fo, "sender_user", None)
+        return bool(u) and (u.id in ADMIN_IDS or u.id in store.admins())
+    if t == "channel":
+        ref = store.get("post_chan")
+        return bool(ref) and ref.lstrip("-").isdigit() and fo.chat.id == int(ref)
+    return False
+
+
+def _first_line(text, ents):
+    """First non-empty line of a caption with its entities (offsets re-based, clipped to the line)."""
+    if not text:
+        return None
+    pos = 0
+    for line in text.split("\n"):
+        if line.strip():
+            body = line.rstrip()
+            s16 = _u16(text[:pos])
+            e16 = s16 + _u16(body)
+            out = []
+            for d in ents or []:
+                a, z = d["offset"], d["offset"] + d["length"]
+                a, z = max(a, s16), min(z, e16)
+                if z > a:
+                    d = dict(d)
+                    d["offset"], d["length"] = a - s16, z - a
+                    out.append(d)
+            return body, out
+        pos += len(line) + 1
+    return None
+
+
 async def pub_preview(update, ctx, text, ents):
     pub = ctx.user_data.get("pub")
     m = update.effective_message
     url = f"https://t.me/{ctx.bot.username}?start={pub['code']}"
     cap, ents2 = build_caption(text, ents, url)
+    fl = pub.get("fwd_line")
+    if fl:
+        pre = fl[0] + "\n\n"
+        sh = _u16(pre)
+        ents2 = [dict(d, offset=d["offset"] + sh) for d in ents2]
+        ents2 = [dict(d) for d in fl[1]] + ents2
+        cap = pre + cap
     if _u16(cap) > 1024:
         ctx.user_data["await"] = "pcap"
         await m.reply_text(f"الوصف طويل ({_u16(cap)}). الحد 1024 حرف، أرسل وصفاً أقصر لهذه المرة.")
@@ -818,6 +863,15 @@ async def collect_media(update: Update, ctx):
     pub = ctx.user_data.get("pub")
     if pub is not None and not ctx.user_data.get("await") and not pub.get("cap"):
         m = update.message
+        if not _fwd_own(m):
+            if m.media_group_id is None or pub.get("rej") != m.media_group_id:
+                pub["rej"] = m.media_group_id
+                await m.reply_text("هذي الرسالة محوّلة من مصدر ثاني (مو من حسابك أو قناتك)، فما أخذتها. حوّل صورك من رسائلك المحفوظة أو من قناتك، أو أرسلها مباشرة.")
+            return
+        if m.caption and not pub.get("fwd_line"):
+            fl = _first_line(m.caption, [e.to_dict() for e in (m.caption_entities or [])])
+            if fl:
+                pub["fwd_line"] = fl
         if m.photo:
             pub["media"].append(("photo", m.photo[-1].file_id))
         elif m.video:
