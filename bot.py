@@ -171,7 +171,6 @@ async def start(update: Update, ctx):
         ctx.user_data["me"] = update.effective_user.id
         t, m = screen("main", ctx)
         await update.message.reply_text(t, reply_markup=m)
-        return
     await update.message.reply_text(store.get("welcome"))
 
 
