@@ -1,7 +1,7 @@
 import os, time, asyncio, logging, datetime
 import json, secrets, tempfile, io
 from urllib.parse import quote
-from telegram import InputMediaPhoto, InputMediaDocument, MessageEntity
+from telegram import InputMediaPhoto, InputMediaVideo, InputMediaDocument, MessageEntity
 import httpx
 from telegram import InlineKeyboardButton as B, InlineKeyboardMarkup as M, Update
 from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
@@ -404,7 +404,170 @@ async def user_cb(update: Update, ctx):
     await deliver_to(ctx.bot, q.message.chat_id, uid, code)
 
 
+import re as _re
+
+
+def _u16(s):
+    return len(s.encode("utf-16-le")) // 2
+
+
+def build_caption(text, ents, url):
+    """[word] in the text becomes a clickable link to url (brackets removed). No brackets: appends a link line.
+    Other entities (bold, premium emoji...) are kept and shifted."""
+    pairs = list(_re.finditer(r"\[([^\[\]\n]+)\]", text))
+    out = [dict(e) for e in (ents or [])]
+    if not pairs:
+        sep = "\n\n" if text else ""
+        pre = text + sep + "👉 "
+        out.append({"type": "text_link", "offset": _u16(pre), "length": _u16("اضغط هنا"), "url": url})
+        return pre + "اضغط هنا", out
+    removed = []
+    for m in pairs:
+        removed += [_u16(text[:m.start()]), _u16(text[:m.end() - 1])]
+    new_text = _re.sub(r"\[([^\[\]\n]+)\]", lambda m: m.group(1), text)
+
+    def new_off(o):
+        return o - sum(1 for r in removed if r < o)
+
+    res = []
+    for e in out:
+        s = new_off(e["offset"])
+        en = new_off(e["offset"] + e["length"])
+        if en > s:
+            e["offset"], e["length"] = s, en - s
+            res.append(e)
+    for m in pairs:
+        s = new_off(_u16(text[:m.start()]) + 1)
+        res.append({"type": "text_link", "offset": s, "length": _u16(m.group(1)), "url": url})
+    return new_text, res
+
+
+def _pub_media(bot, pub, cap=None, ents=None):
+    out = []
+    for i, (t, f) in enumerate(pub["media"]):
+        kw = {}
+        if i == 0 and cap:
+            kw = {"caption": cap, "caption_entities": [MessageEntity.de_json(d, bot) for d in (ents or [])] or None}
+        out.append((InputMediaPhoto if t == "photo" else InputMediaVideo)(f, **kw))
+    return out
+
+
+async def pub_buttons(update: Update, ctx, parts):
+    q = update.callback_query
+    act = parts[1]
+    if act == "pchan":
+        ctx.user_data["await"] = "pchan"
+        await q.message.reply_text("أضف البوت أدمن بقناتك (بصلاحية نشر الرسائل)، وبعدها أرسل هنا @يوزر القناة، أو حوّل رسالة منها.\n(/cancel للإلغاء)")
+        return
+    if act == "pubcancel":
+        ctx.user_data.pop("pub", None)
+        ctx.user_data.pop("await", None)
+        await q.message.reply_text("أُلغي النشر.")
+        return
+    if act == "pub":
+        code = parts[2]
+        if not store.link_meta(code):
+            return
+        ctx.user_data["pub"] = {"code": code, "media": [], "grp": None}
+        if not store.get("post_chan"):
+            ctx.user_data["pub"]["need_chan"] = True
+            ctx.user_data["await"] = "pchan"
+            await q.message.reply_text("أول مرة: أضف البوت أدمن بقناتك (بصلاحية نشر الرسائل)، وبعدها أرسل هنا @يوزر القناة، أو حوّل رسالة منها.\n(/cancel للإلغاء)")
+            return
+        await _pub_ask_media(q.message)
+        return
+    pub = ctx.user_data.get("pub")
+    if not pub:
+        await q.message.reply_text("انتهت الجلسة، ابدأ من جديد من شاشة الرابط.")
+        return
+    if act == "pubdone":
+        if not pub["media"]:
+            await q.message.reply_text("أرسل صورة وحدة على الأقل أول.")
+            return
+        ctx.user_data["await"] = "pcap"
+        await q.message.reply_text(
+            "أرسل الوصف. اكتب الكلمة الي تريدها رابط بين أقواس، مثل:\nشاهد المحتوى كامل [اضغط هنا]\nوتصير [اضغط هنا] رابط يفتح البوت على هذا الرابط. "
+            "إذا ما حطيت أقواس يضيف بالنهاية 👉 اضغط هنا.\nتكدر تستخدم تنسيق تلكرام والإيموجي المتحرك.\n(/cancel للإلغاء)")
+        return
+    if act == "pubgo":
+        if not pub.get("cap"):
+            return
+        ref = store.get("post_chan")
+        try:
+            chat = int(ref) if ref.lstrip("-").isdigit() else ref
+            await ctx.bot.send_media_group(chat, _pub_media(ctx.bot, pub, pub["cap"], pub["ents"]))
+            store.log("channel_post", update.effective_user.id, pub["code"])
+            ctx.user_data.pop("pub", None)
+            await q.message.reply_text("✅ اننشر بالقناة.")
+        except Exception as e:
+            await q.message.reply_text("فشل النشر: " + str(e)[:150])
+        return
+
+
+async def _pub_ask_media(msg):
+    await msg.reply_text(
+        "أرسل الصور (أو فيديو) الي تريدها بالمنشور، 2 أو أكثر، حتى 10. تكدر ترسلها ألبوم أو وحدة وحدة. بعدها اضغط ✅ تم.",
+        reply_markup=M([[B("✅ تم", callback_data="n:pubdone"), B("❌ إلغاء", callback_data="n:pubcancel")]]))
+
+
+async def pub_input(update: Update, ctx, key):
+    m = update.message
+    pub = ctx.user_data.get("pub")
+    if key == "pchan":
+        ref = None
+        fo = getattr(m, "forward_origin", None)
+        if fo is not None and getattr(fo, "chat", None) is not None:
+            ref = fo.chat.id
+        elif m.text:
+            t = m.text.strip()
+            ref = t if t.startswith("@") else ("@" + t if not t.lstrip("-").isdigit() else int(t))
+        if ref is None:
+            ctx.user_data["await"] = "pchan"
+            await m.reply_text("أرسل @يوزر القناة أو حوّل رسالة منها.")
+            return True
+        try:
+            ch = await ctx.bot.get_chat(ref)
+            me = await ctx.bot.get_chat_member(ch.id, ctx.bot.id)
+            ok = me.status in ("administrator", "creator") and (getattr(me, "can_post_messages", True) is not False)
+        except Exception as e:
+            ctx.user_data["await"] = "pchan"
+            await m.reply_text("ما كدرت أوصل للقناة: " + str(e)[:100] + "\nتأكد البوت أدمن فيها وجرب مرة ثانية.")
+            return True
+        if not ok:
+            ctx.user_data["await"] = "pchan"
+            await m.reply_text("البوت مو أدمن بالقناة أو ما عنده صلاحية نشر الرسائل. عدّل صلاحياته وأرسل مرة ثانية.")
+            return True
+        store.set("post_chan", str(ch.id))
+        store.set("post_chan_name", ch.title or str(ch.id))
+        await m.reply_text(f"✅ قناة النشر: {ch.title}")
+        if pub and pub.pop("need_chan", None):
+            await _pub_ask_media(m)
+        return True
+    if key == "pcap" and pub:
+        text = m.text or ""
+        url = f"https://t.me/{ctx.bot.username}?start={pub['code']}"
+        cap, ents = build_caption(text, [e.to_dict() for e in (m.entities or [])], url)
+        if _u16(cap) > 1024:
+            ctx.user_data["await"] = "pcap"
+            await m.reply_text(f"الوصف طويل ({_u16(cap)}). الحد 1024 حرف، قصّره وأرسله.")
+            return True
+        pub["cap"], pub["ents"] = cap, ents
+        try:
+            await ctx.bot.send_media_group(update.effective_chat.id, _pub_media(ctx.bot, pub, cap, ents))
+        except Exception as e:
+            ctx.user_data["await"] = "pcap"
+            await m.reply_text("فشلت المعاينة: " + str(e)[:150])
+            return True
+        await m.reply_text(f"هذي المعاينة. تنشر بقناة {store.get('post_chan_name') or ''}؟",
+                           reply_markup=M([[B("✅ نشر", callback_data="n:pubgo"), B("❌ إلغاء", callback_data="n:pubcancel")]]))
+        return True
+    return False
+
+
 async def link_buttons(update: Update, ctx, parts):
+    if parts[1] in ("pub", "pubdone", "pubgo", "pubcancel", "pchan"):
+        await pub_buttons(update, ctx, parts)
+        return
     q = update.callback_query
     act = parts[1]
     if act == "new":
@@ -494,6 +657,22 @@ async def link_buttons(update: Update, ctx, parts):
 
 async def collect_media(update: Update, ctx):
     if not is_admin(update.effective_user):
+        return
+    pub = ctx.user_data.get("pub")
+    if pub is not None and not ctx.user_data.get("await") and not pub.get("cap"):
+        m = update.message
+        if m.photo:
+            pub["media"].append(("photo", m.photo[-1].file_id))
+        elif m.video:
+            pub["media"].append(("video", m.video.file_id))
+        else:
+            await m.reply_text("للمنشور أرسل صور أو فيديو فقط.")
+            return
+        del pub["media"][10:]
+        if m.media_group_id is None or pub.get("grp") != m.media_group_id:
+            pub["grp"] = m.media_group_id
+            await m.reply_text(f"✔️ استلمت. العدد الحالي: {len(pub['media'])}. أرسل أكثر أو اضغط ✅ تم.",
+                               reply_markup=M([[B("✅ تم", callback_data="n:pubdone"), B("❌ إلغاء", callback_data="n:pubcancel")]]))
         return
     if ctx.user_data.get("await") == "restore":
         ctx.user_data.pop("await", None)
@@ -684,6 +863,7 @@ def screen(name, ctx):
             [B("✏️ رسالة التنبيه (للروابط الجديدة)", callback_data="w:note")],
             [B(f"🌫 التغبيش للروابط الجديدة: {s.get('blur')} (1-10)", callback_data="w:blur")],
             [B("🔐 رسالة القفل (للروابط الجديدة)", callback_data="w:lock_msg")],
+            [B(f"📣 قناة النشر: {s.get('post_chan_name') or 'غير محددة'}", callback_data="n:pchan")],
             [B("📝 رسالة الترحيب", callback_data="a:content")],
             [B(f"🚫 إشعار الحظر {tick(s.on('ban_notice'))}", callback_data="a:bannotice"),
              B(f"🔔 إشعار الدخول {tick(s.on('notify_join'))}", callback_data="a:joinnotice")],
@@ -797,6 +977,7 @@ def screen(name, ctx):
             [B("💬 الرسالة بعد المحتوى", callback_data=f"n:msg:{c}"), B("🔐 رسالة القفل", callback_data=f"n:lock:{c}")],
             [B("👥 الدعوات المطلوبة", callback_data=f"n:need:{c}"), B("🌫 التغبيش", callback_data=f"n:blur:{c}")],
             [B(f"🔒 منع التوجيه/الحفظ {tick(meta['protect'])}", callback_data=f"n:prot:{c}")],
+            [B("📣 نشر في قناة", callback_data=f"n:pub:{c}")],
             [B("📊 إحصائيات هذا الرابط", callback_data=f"n:stats:{c}"), B("👥 من دخل", callback_data=f"n:vis:{c}:0")],
             [B("♻️ نسخ الإعدادات الافتراضية لهذا الرابط فقط", callback_data=f"n:reset:{c}")],
             [B("🗑 حذف الرابط", callback_data=f"n:del:{c}")], back("links")])
@@ -1152,6 +1333,8 @@ async def admin_input(update: Update, ctx) -> bool:
     if not key or not is_admin(update.effective_user):
         return False
     ctx.user_data.pop("await")
+    if key in ("pcap", "pchan"):
+        return await pub_input(update, ctx, key)
     if key == "restore":
         await update.message.reply_text("أرسل ملف النسخة كمستند، مو نص. ابدأ من جديد من 💾 النسخ الاحتياطي.")
         return True
