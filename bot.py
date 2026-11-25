@@ -180,6 +180,26 @@ async def report(update: Update, ctx):
 
 
 # ---------------- links / delivery ----------------
+def parse_duration(text):
+    """'30', '30s', '2m', '90 ثانية', '5 دقيقة' -> seconds, or None."""
+    import re
+    m = re.fullmatch(r"\s*(\d+)\s*([A-Za-z\u0600-\u06FF]*)\s*", text or "")
+    if not m:
+        return None
+    n, unit = int(m.group(1)), m.group(2).lower()
+    if unit in ("", "s", "sec", "ث", "ثانية", "ثواني", "ثانيه"):
+        sec = n
+    elif unit in ("m", "min", "د", "دقيقة", "دقائق", "دقيقه", "دقايق"):
+        sec = n * 60
+    else:
+        return None
+    return sec if 5 <= sec <= 86400 else None
+
+
+def fmt_dur(sec):
+    sec = int(sec)
+    return f"{sec // 60} دقيقة" if sec % 60 == 0 and sec >= 60 else f"{sec} ثانية"
+
 def media_of(m):
     if m.photo:
         return "photo", m.photo[-1].file_id
@@ -209,7 +229,9 @@ async def delete_later(bot, chat_id, ids, at):
 async def deliver(update: Update, ctx, code):
     items, _v = store.get_link(code)
     chat_id = update.effective_chat.id
-    delay = int(store.get("delay"))
+    meta = store.link_meta(code)
+    delay = int(meta["delay"] or store.get("delay"))
+    note_txt = meta["note"] or store.get("note")
     protect = store.on("protect")
     ids = []
     for it in items:
@@ -220,7 +242,7 @@ async def deliver(update: Update, ctx, code):
             ids.append(m.message_id)
         except TelegramError as e:
             logging.warning("send failed: %s", e)
-    n = await ctx.bot.send_message(chat_id, store.get("note").replace("{s}", str(delay)), protect_content=protect)
+    n = await ctx.bot.send_message(chat_id, note_txt.replace("{s}", fmt_dur(delay)).replace("{t}", fmt_dur(delay)), protect_content=protect)
     ids.append(n.message_id)
     at = time.time() + delay
     store.add_pending(chat_id, ids, at)
@@ -243,14 +265,27 @@ async def link_buttons(update: Update, ctx, parts):
             await q.message.reply_text("ما أضفت أي ملف. ابدأ من جديد من 🔗 الروابط.")
             return
         code = secrets.token_urlsafe(6).replace("-", "a").replace("_", "b")
-        store.add_link(code, items)
+        store.add_link(code, items, "")
         store.log("link_new", update.effective_user.id, code)
-        await q.message.reply_text(f"✅ تم إنشاء الرابط ({len(items)} ملف):\n{link_url(ctx, code)}")
+        ctx.user_data["await"] = "lname:" + code
+        await q.message.reply_text(f"✅ تم إنشاء الرابط ({len(items)} ملف):\n{link_url(ctx, code)}\n\nأرسل اسم للرابط (مثلاً: فيديوهات الجمعة) عشان تعرفه بعدين.")
     elif act == "cancel":
         ctx.user_data.pop("collect", None)
         await q.message.reply_text("أُلغيت.")
     elif act == "show":
-        await q.message.reply_text(link_url(ctx, parts[2]))
+        t, m = screen("link:" + parts[2], ctx)
+        await q.message.reply_text(t, reply_markup=m)
+    elif act in ("name", "time", "msg"):
+        ctx.user_data["await"] = {"name": "lname:", "time": "ldelay:", "msg": "lnote:"}[act] + parts[2]
+        prompt = {"name": "أرسل الاسم الجديد للرابط:",
+                  "time": "أرسل مدة الحذف لهذا الرابط. مثال: 30 أو 45 ثانية أو 2 دقيقة (من 5 ثواني إلى 24 ساعة):",
+                  "msg": "أرسل الرسالة اللي تظهر بعد المحتوى لهذا الرابط. استخدم {s} مكان مدة الحذف:"}[act]
+        await q.message.reply_text(prompt + "\n(/cancel للإلغاء)")
+    elif act == "reset":
+        store.update_link(parts[2], "delay", None)
+        store.update_link(parts[2], "note", None)
+        t, m = screen("link:" + parts[2], ctx)
+        await edit(q, t, m)
     elif act == "del":
         store.del_link(parts[2])
         t, m = screen("links", ctx)
@@ -322,7 +357,7 @@ def screen(name, ctx):
         return "⚙️ الإعدادات", M([
             [B(f"🛠 وضع الصيانة {tick(s.on('maintenance'))}", callback_data="t:maintenance:settings")],
             [B(f"🔐 الاشتراك الإجباري {tick(s.on('gate_on'))}", callback_data="t:gate_on:settings")],
-            [B(f"⏱ مدة الحذف: {s.get('delay')} ثانية", callback_data="w:delay")],
+            [B(f"⏱ المدة الافتراضية: {fmt_dur(s.get('delay'))}", callback_data="w:delay")],
             [B(f"🔒 حماية المحتوى (منع التوجيه/الحفظ) {tick(s.on('protect'))}", callback_data="t:protect:settings")],
             [B("✏️ رسالة التنبيه", callback_data="w:note")], back()])
     if name == "users":
@@ -334,10 +369,25 @@ def screen(name, ctx):
     if name == "links":
         ls = s.links()
         rows = [[B("➕ إنشاء رابط جديد", callback_data="n:new")]]
-        for c, n, v in ls:
-            rows.append([B(f"🔗 {c} ({n} ملف، {v} مشاهدة)", callback_data=f"n:show:{c}"), B("🗑", callback_data=f"n:del:{c}")])
+        for c, nm, n, v in ls:
+            rows.append([B(f"🔗 {nm or c} ({n} ملف، {v} مشاهدة)", callback_data=f"n:show:{c}")])
         rows.append(back())
-        return f"🔗 الروابط ({len(ls)})\n\nكل رابط يرسل ملفاتك ثم يحذفها بعد {s.get('delay')} ثانية.", M(rows)
+        return f"🔗 الروابط ({len(ls)})\n\nاضغط على رابط لعرضه وتعديل اسمه ومدة حذفه ورسالته.", M(rows)
+    if name.startswith("link:"):
+        c = name[5:]
+        meta = s.link_meta(c)
+        if not meta:
+            return "الرابط غير موجود.", M([back("links")])
+        got = s.get_link(c)
+        d = meta["delay"] or int(s.get("delay"))
+        dtxt = fmt_dur(d) + ("" if meta["delay"] else " (الافتراضي)")
+        ntxt = (meta["note"] or s.get("note")).replace("{s}", fmt_dur(d)) + ("" if meta["note"] else "\n(الافتراضية)")
+        txt = (f"🔗 {meta['name'] or c}\n\nالرابط:\nhttps://t.me/{ctx.bot.username}?start={c}\n\n"
+               f"الملفات: {len(got[0])} | المشاهدات: {meta['views']}\nمدة الحذف: {dtxt}\nالرسالة:\n{ntxt}")
+        return txt, M([
+            [B("✏️ الاسم", callback_data=f"n:name:{c}"), B("⏱ المدة", callback_data=f"n:time:{c}")],
+            [B("💬 الرسالة", callback_data=f"n:msg:{c}"), B("♻️ رجّع الرسالة/المدة للافتراضي", callback_data=f"n:reset:{c}")],
+            [B("🗑 حذف الرابط", callback_data=f"n:del:{c}")], back("links")])
     if name == "stats":
         total, day, active, banned = s.stats()
         return (f"📊 الإحصائيات\n\nكل المستخدمين: {total}\nجدد آخر 24 ساعة: {day}\nنشطين آخر 24 ساعة: {active}\nالمحظورين: {banned}",
@@ -416,7 +466,7 @@ PROMPTS = {
     "ban": "أرسل ID المستخدم للحظر:", "unban": "أرسل ID المستخدم لفك الحظر:",
     "channel_add": "أرسل يوزر القناة مثل @name (وأضف البوت أدمن فيها):",
     "broadcast": "أرسل نص الرسالة الجماعية:",
-    "delay": "أرسل مدة الحذف بالثواني (بين 5 و3600):",
+    "delay": "أرسل مدة الحذف الافتراضية. مثال: 30 أو 2 دقيقة:",
     "note": "أرسل نص رسالة التنبيه. استخدم {s} مكان عدد الثواني:",
 }
 
@@ -490,12 +540,30 @@ async def admin_input(update: Update, ctx) -> bool:
     text = update.message.text.strip()
     s = store
     uid = update.effective_user.id
+    if key.startswith(("lname:", "ldelay:", "lnote:")):
+        kind, code = key.split(":", 1)
+        if not s.link_meta(code):
+            await update.message.reply_text("الرابط غير موجود.")
+            return True
+        if kind == "ldelay":
+            sec = parse_duration(text)
+            if sec is None:
+                ctx.user_data["await"] = key
+                await update.message.reply_text("ما فهمت المدة. اكتب مثل: 30 أو 45 ثانية أو 2 دقيقة (من 5 ثواني إلى 24 ساعة).")
+                return True
+            s.update_link(code, "delay", sec)
+        else:
+            s.update_link(code, "name" if kind == "lname" else "note", text[:100] if kind == "lname" else text)
+        t, m = screen("link:" + code, ctx)
+        await update.message.reply_text("✔️ تم.\n\n" + t, reply_markup=m)
+        return True
     if key == "delay":
-        if text.isdigit() and 5 <= int(text) <= 3600:
-            s.set("delay", text)
+        sec = parse_duration(text)
+        if sec is not None:
+            s.set("delay", str(sec))
             await update.message.reply_text("✔️ تم الحفظ.")
         else:
-            await update.message.reply_text("رقم بين 5 و3600.")
+            await update.message.reply_text("اكتب مثل: 30 أو 2 دقيقة (من 5 ثواني إلى 24 ساعة).")
         return True
     if key in ("welcome", "gate_msg", "support", "ban_msg", "note"):
         s.set(key, text)
