@@ -482,6 +482,21 @@ async def pub_buttons(update: Update, ctx, parts):
             return
         await _pub_ask_media(q.message)
         return
+    if act == "pubkeep":
+        ctx.user_data.pop("lastpost", None)
+        await q.message.reply_text("تمام، خليته.")
+        return
+    if act == "pubdel":
+        lp = ctx.user_data.pop("lastpost", None)
+        if not lp:
+            await q.message.reply_text("ما أكدر أحذفه (انتهت الجلسة).")
+            return
+        try:
+            await ctx.bot.delete_messages(lp[0], lp[1])
+            await q.message.reply_text("🗑 انحذف المنشور من القناة.")
+        except Exception as e:
+            await q.message.reply_text("ما كدرت أحذفه: " + str(e)[:100])
+        return
     pub = ctx.user_data.get("pub")
     if not pub:
         await q.message.reply_text("انتهت الجلسة، ابدأ من جديد من شاشة الرابط.")
@@ -512,10 +527,18 @@ async def pub_buttons(update: Update, ctx, parts):
         use = [d for d in ents_all if d.get("type") != "custom_emoji"] if act == "pubgoplain" else ents_all
         try:
             chat = int(ref) if ref.lstrip("-").isdigit() else ref
-            await ctx.bot.send_media_group(chat, _pub_media(ctx.bot, pub, pub["cap"], use))
+            res = await ctx.bot.send_media_group(chat, _pub_media(ctx.bot, pub, pub["cap"], use))
             store.log("channel_post", update.effective_user.id, pub["code"])
             ctx.user_data.pop("pub", None)
-            await q.message.reply_text("✅ اننشر بالقناة." + (" (الإيموجي المتحرك نزلت إيموجي عادي)" if act == "pubgoplain" and has_ce else ""))
+            if act == "pubgo" and has_ce and not _kept_ce(res):
+                logging.warning("custom emoji dropped silently in channel post")
+                ids = [r.message_id for r in res]
+                ctx.user_data["lastpost"] = (chat, ids)
+                await q.message.reply_text(
+                    "اننشر بالقناة، لكن تلكرام تجاهل الإيموجي المتحرك ونزلت عادية. السبب: البوتات ما تقدر ترسل إيموجي متحرك بالقنوات (حتى لو عندك Premium). تحذف هذا المنشور؟",
+                    reply_markup=M([[B("🗑 احذف المنشور", callback_data="n:pubdel"), B("خليه", callback_data="n:pubkeep")]]))
+            else:
+                await q.message.reply_text("✅ اننشر بالقناة." + (" (الإيموجي المتحرك نزلت إيموجي عادي)" if act == "pubgoplain" and has_ce else ""))
         except Exception as e:
             if has_ce and act == "pubgo":
                 await q.message.reply_text(
@@ -539,6 +562,15 @@ async def _pub_ask_media(msg):
         reply_markup=M([[B("✅ تم", callback_data="n:pubdone"), B("❌ إلغاء", callback_data="n:pubcancel")]]))
 
 
+def _kept_ce(res):
+    """True if Telegram kept custom emoji entities on the sent album's caption (it can silently drop them)."""
+    try:
+        first = res[0]
+        return any(getattr(e, "type", None) == "custom_emoji" for e in (first.caption_entities or []))
+    except Exception:
+        return False
+
+
 async def pub_preview(update, ctx, text, ents):
     pub = ctx.user_data.get("pub")
     m = update.effective_message
@@ -553,9 +585,13 @@ async def pub_preview(update, ctx, text, ents):
     pub["plain"] = False
     note = ""
     try:
-        await ctx.bot.send_media_group(update.effective_chat.id, _pub_media(ctx.bot, pub, cap, ents2))
+        res = await ctx.bot.send_media_group(update.effective_chat.id, _pub_media(ctx.bot, pub, cap, ents2))
         if has_ce:
-            note = "\n✅ الإيموجي المتحرك قبلها تلكرام بالمعاينة."
+            if _kept_ce(res):
+                note = "\n✅ الإيموجي المتحرك قبلها تلكرام بالمعاينة (بالقناة قد يختلف)."
+            else:
+                note = "\n⚠️ تلكرام تجاهل الإيموجي المتحرك بالمعاينة وعرضها عادية (البوت ما يقدر يرسلها)."
+                logging.warning("custom emoji dropped silently in preview")
     except Exception as e:
         if not has_ce:
             ctx.user_data["await"] = "pcap"
@@ -631,7 +667,7 @@ async def pub_input(update: Update, ctx, key):
 
 
 async def link_buttons(update: Update, ctx, parts):
-    if parts[1] in ("pub", "pubdone", "pubgo", "pubcancel", "pchan", "pubcap2", "pcapset", "pubgoplain"):
+    if parts[1] in ("pub", "pubdone", "pubgo", "pubcancel", "pchan", "pubcap2", "pcapset", "pubgoplain", "pubdel", "pubkeep"):
         await pub_buttons(update, ctx, parts)
         return
     q = update.callback_query
