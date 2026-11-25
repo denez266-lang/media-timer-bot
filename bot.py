@@ -663,19 +663,18 @@ def screen(name, ctx):
     """Returns (text, markup) for an admin screen."""
     s = store
     if name == "main":
+        nl = s.q("SELECT COUNT(*) FROM links", one=True)[0]
+        nu = s.q("SELECT COUNT(*) FROM users", one=True)[0]
         rows = [
             [B("🔗 الروابط والمحتوى", callback_data="a:links")],
-            [B("📝 المحتوى", callback_data="a:content"), B("⚙️ الإعدادات\n\nالمدة والرسالة والتغبيش والقفل والحماية هنا هي قيم أولية للروابط الجديدة فقط. تتنسخ لكل رابط عند إنشائه، وتغييرها ما يغيّر الروابط الموجودة. كل رابط يتعدل لحاله من 🔗 الروابط.", callback_data="a:settings")],
-            [B("🔐 الاشتراك", callback_data="a:sub"), B("👥 المستخدمون", callback_data="a:users")],
-            [B("📢 التواصل", callback_data="a:comm"), B("💾 النسخ الاحتياطي", callback_data="a:backup")],
-            [B("🆘 الإبلاغ عن مشكلة", callback_data="a:report"), B("🛠 النظام والدعم", callback_data="a:sys")],
-            [B(f"🚫 إشعار الحظر {tick(s.on('ban_notice'))}", callback_data="a:bannotice"),
-             B(f"🔔 إشعار الدخول {tick(s.on('notify_join'))}", callback_data="a:joinnotice")],
+            [B("📢 الإذاعة", callback_data="a:comm"), B("👥 المستخدمون", callback_data="a:users")],
+            [B("🔐 الاشتراك الإجباري", callback_data="a:sub"), B("💾 النسخ الاحتياطي", callback_data="a:backup")],
+            [B("⚙️ الإعدادات", callback_data="a:settings"), B("🛠 النظام والدعم", callback_data="a:sys")],
         ]
-        return "🎛 لوحة الأدمن", M(rows)
+        return f"🎛 لوحة الأدمن\n\n🔗 {nl} رابط  |  👥 {nu} مستخدم", M(rows)
     if name == "content":
         return f"📝 المحتوى\n\nرسالة الترحيب الحالية:\n{s.get('welcome')}", M([
-            [B("✏️ تعديل رسالة الترحيب", callback_data="w:welcome")], back()])
+            [B("✏️ تعديل رسالة الترحيب", callback_data="w:welcome")], back("settings")])
     if name == "settings":
         return "⚙️ الإعدادات\n\nالمدة والرسالة والتغبيش والقفل والحماية هنا هي قيم أولية للروابط الجديدة فقط. تتنسخ لكل رابط عند إنشائه، وتغييرها ما يغيّر الروابط الموجودة. كل رابط يتعدل لحاله من 🔗 الروابط.", M([
             [B(f"🛠 وضع الصيانة {tick(s.on('maintenance'))}", callback_data="t:maintenance:settings")],
@@ -684,7 +683,11 @@ def screen(name, ctx):
             [B(f"🔒 حماية المحتوى للروابط الجديدة {tick(s.on('protect'))}", callback_data="t:protect:settings")],
             [B("✏️ رسالة التنبيه (للروابط الجديدة)", callback_data="w:note")],
             [B(f"🌫 التغبيش للروابط الجديدة: {s.get('blur')} (1-10)", callback_data="w:blur")],
-            [B("🔐 رسالة القفل (للروابط الجديدة)", callback_data="w:lock_msg")], back()])
+            [B("🔐 رسالة القفل (للروابط الجديدة)", callback_data="w:lock_msg")],
+            [B("📝 رسالة الترحيب", callback_data="a:content")],
+            [B(f"🚫 إشعار الحظر {tick(s.on('ban_notice'))}", callback_data="a:bannotice"),
+             B(f"🔔 إشعار الدخول {tick(s.on('notify_join'))}", callback_data="a:joinnotice")],
+            back()])
     if name == "users":
         return "👥 المستخدمون\n\nإدارة المستخدمين والأدمنية", M([
             [B("📊 الإحصائيات", callback_data="a:stats"), B("👤 المسؤولون", callback_data="a:admins")],
@@ -892,16 +895,17 @@ def screen(name, ctx):
         up = int(time.time() - START)
         return (f"🛠 النظام والدعم\n\nمدة التشغيل: {up//3600}س {(up%3600)//60}د\n"
                 f"💾 البيانات تنحفظ تلقائياً كملف مثبّت (backup.db) بمحادثتك مع البوت. لا تحذفه.\n\nنص الدعم:\n{s.get('support')}",
-                M([[B("✏️ تعديل نص الدعم", callback_data="w:support")], back()]))
+                M([[B("✏️ تعديل نص الدعم", callback_data="w:support")],
+                   [B("🆘 رابط الإبلاغ عن مشكلة", callback_data="a:report")], back()]))
     if name == "report":
         return f"🆘 الإبلاغ عن مشكلة\n\nرابط حالي: {s.get('report_url') or 'غير محدد'}\nيظهر للمستخدم عند أمر /report", M([
-            [B("✏️ تعديل الرابط", callback_data="w:report_url")], back()])
+            [B("✏️ تعديل الرابط", callback_data="w:report_url")], back("sys")])
     if name == "bannotice":
         return f"🚫 إشعار الحظر {tick(s.on('ban_notice'))}\n\nالرسالة:\n{s.get('ban_msg')}", M([
-            [B("تشغيل/إيقاف", callback_data="t:ban_notice:bannotice"), B("✏️ تعديل", callback_data="w:ban_msg")], back()])
+            [B("تشغيل/إيقاف", callback_data="t:ban_notice:bannotice"), B("✏️ تعديل", callback_data="w:ban_msg")], back("settings")])
     if name == "joinnotice":
         return f"🔔 إشعار الدخول {tick(s.on('notify_join'))}\n\nيوصلك إشعار عند دخول مستخدم جديد.", M([
-            [B("تشغيل/إيقاف", callback_data="t:notify_join:joinnotice")], back()])
+            [B("تشغيل/إيقاف", callback_data="t:notify_join:joinnotice")], back("settings")])
     return "؟", M([back()])
 
 
