@@ -414,7 +414,7 @@ def _u16(s):
 def build_caption(text, ents, url):
     """#word# in the text becomes a clickable link to url (the # marks removed). No marks: text is posted exactly as written.
     Other entities (bold, premium emoji...) are kept and shifted."""
-    pairs = list(_re.finditer(r"#([^#\n]*?\S[^#\n]*?)#", text))
+    pairs = list(_re.finditer(r"(?<!\w)#([^#]*?\S[^#]*?)#(?!\w)", text))
     # auto-detected types (a "#word#" arrives as a hashtag entity) conflict with a text_link: drop them
     out = [dict(e) for e in (ents or []) if e.get("type") not in ("hashtag", "cashtag", "mention", "url", "email", "phone_number", "bot_command")]
     if not pairs:
@@ -422,7 +422,7 @@ def build_caption(text, ents, url):
     removed = []
     for m in pairs:
         removed += [_u16(text[:m.start()]), _u16(text[:m.end() - 1])]
-    new_text = _re.sub(r"#([^#\n]*?\S[^#\n]*?)#", lambda m: m.group(1), text)
+    new_text = _re.sub(r"(?<!\w)#([^#]*?\S[^#]*?)#(?!\w)", lambda m: m.group(1), text)
 
     def new_off(o):
         return o - sum(1 for r in removed if r < o)
