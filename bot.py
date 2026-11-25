@@ -495,6 +495,29 @@ async def link_buttons(update: Update, ctx, parts):
 async def collect_media(update: Update, ctx):
     if not is_admin(update.effective_user):
         return
+    if ctx.user_data.get("await") == "restore":
+        ctx.user_data.pop("await", None)
+        d = update.message.document
+        if not d or d.file_size and d.file_size > 20 * 1024 * 1024:
+            await update.message.reply_text("أرسل ملف النسخة (.db) كمستند.")
+            return
+        tmp = tempfile.mktemp(suffix=".db")
+        try:
+            tf = await ctx.bot.get_file(d.file_id)
+            await tf.download_to_drive(tmp)
+        except Exception as e:
+            await update.message.reply_text("ما كدرت أنزل الملف: " + str(e)[:100])
+            return
+        info = await asyncio.to_thread(store.check_backup, tmp)
+        if not info:
+            os.remove(tmp)
+            await update.message.reply_text("هذا الملف مو نسخة صالحة لهذا البوت.")
+            return
+        ctx.user_data["restore_tmp"] = tmp
+        await update.message.reply_text(
+            f"ملف صالح: 🔗 {info[0]} رابط | 👥 {info[1]} مستخدم.\nالاسترجاع يبدل البيانات الحالية بهذي النسخة (وأرسل لك نسخة من الحالية قبلها). تكمل؟",
+            reply_markup=M([[B("✅ استرجاع", callback_data="a:bkok"), B("❌ إلغاء", callback_data="a:bkno")]]))
+        return
     if ctx.user_data.get("await") == "broadcast":
         ctx.user_data.pop("await", None)
         t0, f0 = media_of(update.message)
@@ -598,7 +621,38 @@ async def backup_loop(app):
             logging.warning("backup failed: %s", e)
 
 
+async def send_backup(app, why="auto"):
+    """Send a NEW, kept backup file to the first admin's chat (not edited, not deleted)."""
+    chat_id = min(ADMIN_IDS)
+    tmp = tempfile.mktemp(suffix=".db")
+    await asyncio.to_thread(store.snapshot, tmp)
+    store.dirty = True  # snapshot clears it; the pinned live copy still needs its own refresh
+    n_links = store.q("SELECT COUNT(*) FROM links", one=True)[0]
+    n_users = store.q("SELECT COUNT(*) FROM users", one=True)[0]
+    name = "backup-" + datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=3))).strftime("%Y-%m-%d-%H%M") + ".db"
+    cap = f"💾 نسخة احتياطية ({'تلقائية كل 48 ساعة' if why == 'auto' else 'يدوية'})\n🔗 {n_links} رابط | 👥 {n_users} مستخدم\nاحتفظ بها. للاسترجاع: لوحة الأدمن > 💾 النسخ الاحتياطي > ♻️ استرجاع."
+    with open(tmp, "rb") as f:
+        await app.bot.send_document(chat_id, f, filename=name, caption=cap, disable_notification=(why == "auto"))
+    os.remove(tmp)
+    store.set("bk_last", str(int(time.time())))
+
+
+async def autobackup_loop(app):
+    while True:
+        await asyncio.sleep(600)
+        try:
+            if not ADMIN_IDS or not store.on("bk_on"):
+                continue
+            last = float(store.get("bk_last") or 0)
+            if time.time() - last >= 48 * 3600:
+                await send_backup(app, "auto")
+        except Exception as e:
+            logging.warning("autobackup failed: %s", e)
+            await asyncio.sleep(1800)
+
+
 async def post_init(app):
+    asyncio.create_task(autobackup_loop(app))
     for chat, ids, at in store.pending():
         asyncio.create_task(delete_later(app.bot, chat, ids, at))
     asyncio.create_task(backup_loop(app))
@@ -613,7 +667,7 @@ def screen(name, ctx):
             [B("🔗 الروابط والمحتوى", callback_data="a:links")],
             [B("📝 المحتوى", callback_data="a:content"), B("⚙️ الإعدادات\n\nالمدة والرسالة والتغبيش والقفل والحماية هنا هي قيم أولية للروابط الجديدة فقط. تتنسخ لكل رابط عند إنشائه، وتغييرها ما يغيّر الروابط الموجودة. كل رابط يتعدل لحاله من 🔗 الروابط.", callback_data="a:settings")],
             [B("🔐 الاشتراك", callback_data="a:sub"), B("👥 المستخدمون", callback_data="a:users")],
-            [B("📢 التواصل", callback_data="a:comm")],
+            [B("📢 التواصل", callback_data="a:comm"), B("💾 النسخ الاحتياطي", callback_data="a:backup")],
             [B("🆘 الإبلاغ عن مشكلة", callback_data="a:report"), B("🛠 النظام والدعم", callback_data="a:sys")],
             [B(f"🚫 إشعار الحظر {tick(s.on('ban_notice'))}", callback_data="a:bannotice"),
              B(f"🔔 إشعار الدخول {tick(s.on('notify_join'))}", callback_data="a:joinnotice")],
@@ -822,6 +876,18 @@ def screen(name, ctx):
         if not rows_:
             lines.append("ما كو إذاعات بعد.")
         return "\n".join(lines), M([back("comm")])
+    if name == "backup":
+        last = float(s.get("bk_last") or 0)
+        nxt = last + 48 * 3600
+        return ("💾 النسخ الاحتياطي\n\n"
+                "البوت يرسل لك ملف نسخة (روابط، محتوى، إعدادات، مستخدمين، إحصائيات) كل 48 ساعة كرسالة جديدة بمحادثتك، "
+                "وتبقى عندك. احتفظ بها أو حملها لمكان ثاني (جوجل درايف مثلاً).\n\n"
+                f"آخر نسخة: {fmt_ts(last) if last else 'لا يوجد'}\n"
+                f"النسخة القادمة: {fmt_ts(nxt) if last and s.on('bk_on') else '-'}\n\n"
+                "لو انحذفت الروابط: اضغط استرجاع وأرسل ملف النسخة.",
+                M([[B("💾 نسخة الآن", callback_data="a:bknow")],
+                   [B(f"⏱ تلقائي كل 48 ساعة {tick(s.on('bk_on'))}", callback_data="t:bk_on:backup")],
+                   [B("♻️ استرجاع من ملف", callback_data="a:bkrestore")], back()]))
     if name == "sys":
         up = int(time.time() - START)
         return (f"🛠 النظام والدعم\n\nمدة التشغيل: {up//3600}س {(up%3600)//60}د\n"
@@ -880,6 +946,39 @@ async def admin_buttons(update: Update, ctx):
     parts = q.data.split(":")
     k = parts[0]
     await q.answer()
+    if q.data == "a:bknow":
+        try:
+            await send_backup(ctx.application, "manual")
+            await q.message.reply_text("تم، أرسلت النسخة فوق.")
+        except Exception as e:
+            await q.message.reply_text("فشل إرسال النسخة: " + str(e)[:100])
+        t, m = screen("backup", ctx)
+        await edit(q, t, m)
+        return
+    if q.data == "a:bkrestore":
+        ctx.user_data["await"] = "restore"
+        await q.message.reply_text("أرسل ملف النسخة (backup...db) الي وصلك من البوت.\nتنبيه: الاسترجاع يبدل كل البيانات الحالية بالنسخة.\n(/cancel للإلغاء)")
+        return
+    if q.data == "a:bkno":
+        p = ctx.user_data.pop("restore_tmp", None)
+        if p and os.path.exists(p):
+            os.remove(p)
+        await q.message.reply_text("تم الإلغاء، ما تغير شي.")
+        return
+    if q.data == "a:bkok":
+        p = ctx.user_data.pop("restore_tmp", None)
+        if not p or not os.path.exists(p):
+            await q.message.reply_text("انتهت صلاحية الملف، ابدأ من جديد.")
+            return
+        try:
+            await send_backup(ctx.application, "manual")  # safety copy of the current data first
+            await asyncio.to_thread(store.restore_from, p)
+            os.remove(p)
+            await q.message.reply_text("✅ تم الاسترجاع. (أرسلت نسخة من البيانات السابقة قبلها للاحتياط.)")
+        except Exception as e:
+            logging.warning("restore failed: %s", e)
+            await q.message.reply_text("فشل الاسترجاع: " + str(e)[:100])
+        return
     if k == "a":
         t, m = screen(parts[1], ctx)
         await edit(q, t, m)
@@ -1049,6 +1148,9 @@ async def admin_input(update: Update, ctx) -> bool:
     if not key or not is_admin(update.effective_user):
         return False
     ctx.user_data.pop("await")
+    if key == "restore":
+        await update.message.reply_text("أرسل ملف النسخة كمستند، مو نص. ابدأ من جديد من 💾 النسخ الاحتياطي.")
+        return True
     text = update.message.text.strip()
     s = store
     uid = update.effective_user.id
