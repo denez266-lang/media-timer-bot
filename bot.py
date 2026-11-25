@@ -1,7 +1,7 @@
 import os, time, asyncio, logging, datetime
 import json, secrets, tempfile, io
 from urllib.parse import quote
-from telegram import InputMediaPhoto, InputMediaVideo, InputMediaDocument, MessageEntity
+from telegram import LinkPreviewOptions, InputMediaPhoto, InputMediaVideo, InputMediaDocument, MessageEntity
 import httpx
 from telegram import InlineKeyboardButton as B, InlineKeyboardMarkup as M, Update
 from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
@@ -365,7 +365,14 @@ async def deliver_to(bot, chat_id, uid, code):
                 logging.warning("album send failed, falling back to single sends: %s", e)
                 for it in chunk:
                     await one(it)
-    n = await bot.send_message(chat_id, note_txt.replace("{s}", fmt_dur(delay)).replace("{t}", fmt_dur(delay)), protect_content=protect)
+    body = note_txt.replace("{s}", fmt_dur(delay)).replace("{t}", fmt_dur(delay))
+    foot = (store.get("footer") or "").strip()
+    if foot:
+        body = (body + "\n\n" if body.strip() else "") + foot
+    try:
+        n = await bot.send_message(chat_id, body, protect_content=protect, link_preview_options=LinkPreviewOptions(is_disabled=True))
+    except TypeError:
+        n = await bot.send_message(chat_id, body, protect_content=protect)
     ids.append(n.message_id)
     at = time.time() + delay
     store.add_pending(chat_id, ids, at)
@@ -1118,6 +1125,7 @@ def screen(name, ctx):
             [B(f"🔐 الاشتراك الإجباري {tick(s.on('gate_on'))}", callback_data="t:gate_on:settings")],
             [B(f"⏱ المدة للروابط الجديدة: {fmt_dur(s.get('delay'))}", callback_data="w:delay")],
             [B(f"🔒 حماية المحتوى للروابط الجديدة {tick(s.on('protect'))}", callback_data="t:protect:settings")],
+            [B("📎 نص أسفل الوسائط (لكل الروابط)" + (" ✅" if s.get("footer") else ""), callback_data="w:footer")],
             [B("✏️ رسالة التنبيه (للروابط الجديدة)", callback_data="w:note")],
             [B(f"🌫 التغبيش للروابط الجديدة: {s.get('blur')} (1-10)", callback_data="w:blur")],
             [B("🔐 رسالة القفل (للروابط الجديدة)", callback_data="w:lock_msg")],
@@ -1365,6 +1373,7 @@ async def admin_cmd(update: Update, ctx):
 
 
 PROMPTS = {
+    "footer": "أرسل النص أو الرابط اللي تريده يظهر أسفل الوسائط عند كل إرسال (مثلاً رابط قناتك). يطبّق على كل الروابط ويتحذف مع الوسائط. أرسل - لإزالته:",
     "welcome": "أرسل رسالة الترحيب الجديدة:", "gate_msg": "أرسل نص رسالة البوابة:", "support": "أرسل نص الدعم:",
     "report_url": "أرسل الرابط (أو - لإزالته):", "ban_msg": "أرسل رسالة الحظر:",
     "admin_add": "أرسل ID المسؤول الجديد (رقم):", "admin_del": "أرسل ID المسؤول للحذف:",
@@ -1660,7 +1669,7 @@ async def admin_input(update: Update, ctx) -> bool:
     if key in ("welcome", "gate_msg", "support", "ban_msg", "note", "lock_msg"):
         s.set(key, text)
         await update.message.reply_text("✔️ تم الحفظ.")
-    elif key == "report_url":
+    elif key in ("report_url", "footer"):
         s.set(key, "" if text == "-" else text)
         await update.message.reply_text("✔️ تم الحفظ.")
     elif key in ("admin_add", "admin_del", "ban", "unban"):
