@@ -1,6 +1,7 @@
 import sqlite3, threading, time, json
 
 DEFAULTS = {
+    "bk_on": "1",
     "welcome": "أهلاً! استخدم رابط دعوة صالح لاستلام المحتوى.",
     "delay": "30",
     "protect": "0",
@@ -30,6 +31,9 @@ class Store:
         self.db = sqlite3.connect(path, check_same_thread=False)
         self.lock = threading.Lock()
         self.dirty = False
+        self._schema()
+
+    def _schema(self):
         self.q("""CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, name TEXT, username TEXT,
                   joined REAL, last_seen REAL, banned INTEGER DEFAULT 0, inviter INTEGER)""")
         self.q("CREATE TABLE IF NOT EXISTS admins(id INTEGER PRIMARY KEY)")
@@ -51,6 +55,32 @@ class Store:
         self.q("CREATE TABLE IF NOT EXISTS invites(code TEXT, inviter INTEGER, invited INTEGER, ts REAL, PRIMARY KEY(code, invited))")
         self.q("CREATE TABLE IF NOT EXISTS pending(id INTEGER PRIMARY KEY AUTOINCREMENT, chat INTEGER, ids TEXT, at REAL)")
         self.q("CREATE TABLE IF NOT EXISTS log(ts REAL, kind TEXT, uid INTEGER, text TEXT)")
+
+    @staticmethod
+    def check_backup(path):
+        """(links, users) counts if path is a valid backup of this bot, else None."""
+        try:
+            c = sqlite3.connect(path)
+            try:
+                if c.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                    return None
+                names = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if not {"links", "users", "settings"} <= names:
+                    return None
+                return (c.execute("SELECT COUNT(*) FROM links").fetchone()[0],
+                        c.execute("SELECT COUNT(*) FROM users").fetchone()[0])
+            finally:
+                c.close()
+        except Exception:
+            return None
+
+    def restore_from(self, path):
+        with self.lock:
+            src = sqlite3.connect(path)
+            src.backup(self.db)
+            src.close()
+        self._schema()
+        self.dirty = True
 
     def q(self, sql, args=(), one=False, many=False):
         with self.lock:
