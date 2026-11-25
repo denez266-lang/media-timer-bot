@@ -449,6 +449,9 @@ async def collect_media(update: Update, ctx):
         return
     col = ctx.user_data.get("collect")
     if col is None:
+        if update.message.media_group_id is None or ctx.user_data.get("hint_grp") != update.message.media_group_id:
+            ctx.user_data["hint_grp"] = update.message.media_group_id
+            await update.message.reply_text("لإضافة هذا المحتوى لرابط: افتح /admin > 🔗 الروابط والمحتوى > إنشاء رابط جديد، وبعدها أرسله أو وجّهه هنا.")
         return
     t, f = media_of(update.message)
     m = update.message
@@ -464,7 +467,12 @@ async def collect_media(update: Update, ctx):
     if th:
         item["th"] = th
     col.append(item)
-    await update.message.reply_text(f"➕ أضفت ({len(col)})",
+    gid = m.media_group_id
+    if gid is not None:
+        if ctx.user_data.get("last_grp") == gid:
+            return
+        ctx.user_data["last_grp"] = gid
+    await update.message.reply_text(f"➕ أضفت ({len(col)}){' (ألبوم، كل صوره تنضاف)' if gid is not None else ''}",
                                     reply_markup=M([[B("✅ إنهاء وإنشاء الرابط", callback_data="n:done")]]))
 
 
