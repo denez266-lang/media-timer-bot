@@ -4,7 +4,7 @@ from urllib.parse import quote
 from telegram import InputMediaPhoto, InputMediaDocument
 import httpx
 from telegram import InlineKeyboardButton as B, InlineKeyboardMarkup as M, Update
-from telegram.error import TelegramError
+from telegram.error import Forbidden, RetryAfter, TelegramError
 from telegram.ext import (Application, ApplicationHandlerStop, CallbackQueryHandler,
                           CommandHandler, ContextTypes, MessageHandler, TypeHandler, filters)
 from store import Store
@@ -21,6 +21,11 @@ DB_PATH = os.environ.get("DB_PATH", "/tmp/bot.db")
 BACKUP = {"msg": None}
 MAX_CHANNELS = 10
 PAGE = 8
+AUD_LABELS = {"new7": "جدد - 7 أيام", "new30": "جدد - 30 يوم", "off7": "غير نشطين +7", "off30": "غير نشطين +30"}
+
+def aud_text(aud):
+    segs = [x for x in (aud or "").split(",") if x in AUD_LABELS]
+    return "الجميع" if not segs else "، ".join(AUD_LABELS[x] for x in segs)
 START = time.time()
 
 def restore_db():
@@ -490,6 +495,11 @@ async def link_buttons(update: Update, ctx, parts):
 async def collect_media(update: Update, ctx):
     if not is_admin(update.effective_user):
         return
+    if ctx.user_data.get("await") == "broadcast":
+        ctx.user_data.pop("await", None)
+        t0, f0 = media_of(update.message)
+        await bc_preview(update, ctx, {"k": t0, "f": f0, "cap": update.message.caption or ""})
+        return
     col = ctx.user_data.get("collect")
     if col is None:
         if update.message.media_group_id is None or ctx.user_data.get("hint_grp") != update.message.media_group_id:
@@ -770,7 +780,47 @@ def screen(name, ctx):
                 "لازم البوت يكون أدمن بكل قناة حتى يتأكد من الاشتراك. القناة تنضاف بيوزرها مثل @name. "
                 "إذا ما أكدر أتحقق من قناة، ما أمنع المستخدمين (حتى لا ينقفل البوت) وأرسل لك تنبيه.", M([back("sub")]))
     if name == "comm":
-        return "📢 التواصل\n\nإرسال رسالة لكل المستخدمين.", M([[B("📣 رسالة جماعية", callback_data="w:broadcast")], back()])
+        aud = s.get("bc_aud")
+        ttl = int(s.get("bc_ttl") or 0)
+        btn = s.get("bc_btn")
+        txt = (f"📢 إذاعة — 📨 مباشر\n━━━━━━━━━━━━\n\nاختر الجمهور\n\n"
+               f"👥 الجمهور الحالي: {aud_text(aud)} ({len(s.audience_ids(aud))} مستخدم)\n"
+               f"🔕 إرسال صامت: {'مفعّل' if s.on('bc_silent') else 'متوقف'}\n"
+               f"⏳ حذف الإذاعة تلقائياً: {fmt_dur(ttl) if ttl else 'متوقف'}\n"
+               f"🔘 زر رابط تحت الرسالة: {btn.split('|', 1)[0].strip() if btn else 'بدون'}")
+        rows = [[B("👥 الجميع", callback_data="b:segall:go")],
+                [B("🎯 فئات محددة", callback_data="a:bcaud")],
+                [B(f"🔕 صامت {tick(s.on('bc_silent'))}", callback_data="t:bc_silent:comm"),
+                 B("⏳ حذف تلقائي", callback_data="w:bc_ttl")],
+                [B("🔘 زر رابط", callback_data="w:bc_btn")] + ([B("🗑 إزالة الزر", callback_data="b:nobtn")] if btn else []),
+                [B("📜 سجل الإذاعات", callback_data="a:bclog")], back()]
+        return txt, M(rows)
+    if name == "bcaud":
+        aud = s.get("bc_aud")
+        sel = [x for x in aud.split(",") if x in AUD_LABELS]
+        cnt = {k: len(s.audience_ids(k)) for k in AUD_LABELS}
+        total = len(s.audience_ids(""))
+        txt = ("لمن ترسل؟\n\nاختر الفئة التي تريد إرسال الإذاعة إليها (تقدر تختار أكثر من فئة):\n\n"
+               f"• الجميع — كل المستخدمين بدون استثناء ({total})\n"
+               f"• جدد 7 أيام — من بدأ البوت خلال آخر أسبوع ({cnt['new7']})\n"
+               f"• جدد 30 يوم — من بدأ البوت خلال آخر شهر ({cnt['new30']})\n"
+               f"• غير نشطين +7 — لم يتفاعلوا منذ أكثر من أسبوع ({cnt['off7']})\n"
+               f"• غير نشطين +30 — لم يتفاعلوا منذ أكثر من شهر ({cnt['off30']})\n\n"
+               f"المحدد الآن: {aud_text(aud)} = {len(s.audience_ids(aud))} مستخدم")
+        mk = lambda k, label: B(("✅ " if k in sel else "☑️ ") + label, callback_data=f"b:seg:{k}")
+        rows = [[B(("✅ " if not sel else "☑️ ") + "إرسال إلى الجميع", callback_data="b:segall")],
+                [mk("new30", "جدد — 30 يومًا"), mk("new7", "جدد — ٧ أيام")],
+                [mk("off30", "غير نشطين +30"), mk("off7", "غير نشطين +7")],
+                [B("🔹 التالي: كتابة الرسالة 🔹", callback_data="b:next")], back("comm")]
+        return txt, M(rows)
+    if name == "bclog":
+        rows_ = s.bc_log()
+        lines = ["📜 آخر الإذاعات", ""]
+        for ts, tx in rows_:
+            lines.append(f"• {fmt_ts(ts)} {tx}")
+        if not rows_:
+            lines.append("ما كو إذاعات بعد.")
+        return "\n".join(lines), M([back("comm")])
     if name == "sys":
         up = int(time.time() - START)
         return (f"🛠 النظام والدعم\n\nمدة التشغيل: {up//3600}س {(up%3600)//60}د\n"
@@ -809,7 +859,9 @@ PROMPTS = {
     "admin_add": "أرسل ID المسؤول الجديد (رقم):", "admin_del": "أرسل ID المسؤول للحذف:",
     "ban": "أرسل ID المستخدم للحظر:", "unban": "أرسل ID المستخدم لفك الحظر:",
     "channel_add": "أرسل يوزر القناة مثل @name (وأضف البوت أدمن فيها):",
-    "broadcast": "أرسل نص الرسالة الجماعية:",
+    "broadcast": "أرسل نص الإذاعة، أو صورة/فيديو مع تعليق (أو وجّه رسالتك هنا). راح أعرضها لك قبل الإرسال:",
+    "bc_ttl": "أرسل بعد كم تنحذف الإذاعة عند المستخدمين (مثال: 30 دقيقة أو 2 ساعة، لحد 24 ساعة). أرسل 0 لإيقاف الحذف:",
+    "bc_btn": "أرسل الزر بهذا الشكل:\nنص الزر | https://رابط\n(أرسل - لإزالته)",
     "blur": "أرسل قوة التغبيش من 1 (خفيف) إلى 10 (قوي). قيمة أولية للروابط الجديدة فقط:",
     "lock_msg": "أرسل رسالة القفل. استخدم {n} للعدد المطلوب، {have} لما دعاه، {link} لرابطه الشخصي:",
     "delay": "أرسل مدة الحذف الافتراضية. مثال: 30 أو 2 دقيقة:",
@@ -851,25 +903,110 @@ async def admin_buttons(update: Update, ctx):
         await edit(q, t, m)
     elif k == "n":
         await link_buttons(update, ctx, parts)
-    elif k == "b":  # confirm broadcast
-        if parts[1] == "yes":
-            text = ctx.user_data.pop("bc", None)
-            if not text:
+    elif k == "b":  # broadcast controls
+        act = parts[1]
+        if act == "seg":
+            sel = [x for x in store.get("bc_aud").split(",") if x in AUD_LABELS]
+            k_ = parts[2]
+            sel = [x for x in sel if x != k_] if k_ in sel else sel + [k_]
+            store.set("bc_aud", ",".join(sel))
+            t, m = screen("bcaud", ctx)
+            await edit(q, t, m)
+        elif act == "segall":
+            store.set("bc_aud", "")
+            t, m = screen("bcaud", ctx)
+            await edit(q, t, m)
+        elif act == "next":
+            ctx.user_data["await"] = "broadcast"
+            await q.message.reply_text(PROMPTS["broadcast"] + f"\n\nالجمهور: {aud_text(store.get('bc_aud'))} ({len(store.audience_ids(store.get('bc_aud')))})\n(/cancel للإلغاء)")
+        elif act == "nobtn":
+            store.set("bc_btn", "")
+            t, m = screen("comm", ctx)
+            await edit(q, t, m)
+        elif act == "stop":
+            ctx.application.bot_data["bc_stop"] = True
+            await q.answer("جاري الإيقاف")
+        elif act == "yes":
+            bc = ctx.user_data.pop("bc", None)
+            if not bc:
                 return
-            await q.message.reply_text("⏳ جاري الإرسال...")
-            ok = bad = 0
-            for uid in store.all_user_ids():
-                try:
-                    await ctx.bot.send_message(uid, text)
-                    ok += 1
-                except TelegramError:
-                    bad += 1
-                await asyncio.sleep(0.05)
-            store.log("broadcast", user.id, f"{ok} ok {bad} failed")
-            await q.message.reply_text(f"تم. وصلت: {ok}، فشلت: {bad}")
+            if ctx.application.bot_data.get("bc_running"):
+                await q.message.reply_text("فيه إذاعة شغالة هسه. انتظر تخلص أو اضغط إيقاف.")
+                ctx.user_data["bc"] = bc
+                return
+            ctx.application.bot_data["bc_stop"] = False
+            ctx.application.bot_data["bc_running"] = True
+            prog = await q.message.reply_text("⏳ جاري الإرسال...", reply_markup=M([[B("🛑 إيقاف", callback_data="b:stop")]]))
+            asyncio.create_task(run_broadcast(ctx.application, user.id, bc, prog))
         else:
             ctx.user_data.pop("bc", None)
             await q.message.reply_text("أُلغيت.")
+
+
+def bc_markup():
+    btn = store.get("bc_btn")
+    if btn and "|" in btn:
+        t, u = [x.strip() for x in btn.split("|", 1)]
+        if t and u.startswith(("http://", "https://", "tg://")):
+            return M([[B(t, url=u)]])
+    return None
+
+
+async def bc_send(bot, uid, bc, silent, markup):
+    kw = {"disable_notification": silent, "reply_markup": markup}
+    if bc["k"] == "text":
+        return await bot.send_message(uid, bc["text"], **kw)
+    fn = {"photo": bot.send_photo, "video": bot.send_video, "animation": bot.send_animation,
+          "document": bot.send_document}[bc["k"]]
+    return await fn(uid, bc["f"], caption=bc.get("cap") or None, **kw)
+
+
+async def run_broadcast(app, admin_id, bc, prog):
+    bot = app.bot
+    aud = store.get("bc_aud")
+    ids = store.audience_ids(aud)
+    silent = store.on("bc_silent")
+    ttl = int(store.get("bc_ttl") or 0)
+    markup = bc_markup()
+    ok = bad = blocked = 0
+    stopped = False
+    try:
+        for n, uid in enumerate(ids, 1):
+            if app.bot_data.get("bc_stop"):
+                stopped = True
+                break
+            for attempt in (0, 1):
+                try:
+                    m = await bc_send(bot, uid, bc, silent, markup)
+                    ok += 1
+                    if ttl:
+                        at = time.time() + ttl
+                        store.add_pending(uid, [m.message_id], at)
+                        asyncio.create_task(delete_later(bot, uid, [m.message_id], at))
+                    break
+                except RetryAfter as e:
+                    await asyncio.sleep(e.retry_after + 1)
+                    continue
+                except Forbidden:
+                    blocked += 1
+                    break
+                except TelegramError:
+                    bad += 1
+                    break
+            await asyncio.sleep(0.05)
+            if n % 100 == 0:
+                try:
+                    await prog.edit_text(f"⏳ جاري الإرسال... {n}/{len(ids)}\nوصلت: {ok}", reply_markup=M([[B("🛑 إيقاف", callback_data="b:stop")]]))
+                except TelegramError:
+                    pass
+    finally:
+        app.bot_data["bc_running"] = False
+    prev = (bc.get("text") or bc.get("cap") or bc["k"])[:25].replace("\n", " ")
+    store.log("broadcast", admin_id, f"{aud_text(aud)} | وصلت {ok} | حاظرين البوت {blocked} | فشلت {bad} | {prev}")
+    try:
+        await prog.edit_text(("🛑 توقفت. " if stopped else "✅ تمت الإذاعة. ") + f"وصلت: {ok}\nحاظرين البوت: {blocked}\nفشلت: {bad}" + (f"\nتنحذف بعد {fmt_dur(ttl)}" if ttl else ""))
+    except TelegramError:
+        pass
 
 
 async def cancel(update: Update, ctx):
@@ -983,10 +1120,49 @@ async def admin_input(update: Update, ctx) -> bool:
             note = f"⚠️ انضافت، بس ما كدرت أوصل للقناة ({e}). تأكد من اليوزر وأضف البوت أدمن."
         await update.message.reply_text(note)
     elif key == "broadcast":
-        ctx.user_data["bc"] = text
-        await update.message.reply_text(f"راح ترسل لـ {len(s.all_user_ids())} مستخدم:\n\n{text}",
-                                         reply_markup=M([[B("✅ إرسال", callback_data="b:yes"), B("❌ إلغاء", callback_data="b:no")]]))
+        await bc_preview(update, ctx, {"k": "text", "text": text})
+    elif key == "bc_ttl":
+        if text in ("0", "-"):
+            s.set("bc_ttl", "0")
+        else:
+            sec = parse_duration(text)
+            if sec is None:
+                ctx.user_data["await"] = "bc_ttl"
+                await update.message.reply_text("ما فهمت. مثال: 30 دقيقة أو 2 ساعة، أو 0 للإيقاف.")
+                return True
+            s.set("bc_ttl", str(sec))
+        t, m = screen("comm", ctx)
+        await update.message.reply_text("✔️ تم.\n\n" + t, reply_markup=m)
+    elif key == "bc_btn":
+        if text == "-":
+            s.set("bc_btn", "")
+        elif "|" in text and text.split("|", 1)[1].strip().startswith(("http://", "https://", "tg://")):
+            s.set("bc_btn", text[:300])
+        else:
+            ctx.user_data["await"] = "bc_btn"
+            await update.message.reply_text("الشكل: نص الزر | https://رابط")
+            return True
+        t, m = screen("comm", ctx)
+        await update.message.reply_text("✔️ تم.\n\n" + t, reply_markup=m)
     return True
+
+
+async def bc_preview(update, ctx, bc):
+    ctx.user_data["bc"] = bc
+    aud = store.get("bc_aud")
+    n = len(store.audience_ids(aud))
+    ttl = int(store.get("bc_ttl") or 0)
+    await update.message.reply_text("👀 هكذي راح توصل الإذاعة:")
+    try:
+        await bc_send(update.get_bot(), update.effective_chat.id, bc, False, bc_markup())
+    except TelegramError as e:
+        await update.message.reply_text(f"ما كدرت أعرض المعاينة: {e}")
+        return
+    await update.message.reply_text(
+        f"راح ترسل لـ {n} مستخدم ({aud_text(aud)})"
+        f"{' بصمت' if store.on('bc_silent') else ''}"
+        f"{', وتنحذف بعد ' + fmt_dur(ttl) if ttl else ''}.",
+        reply_markup=M([[B("✅ إرسال", callback_data="b:yes"), B("❌ إلغاء", callback_data="b:no")]]))
 
 
 async def text_router(update: Update, ctx):
