@@ -503,18 +503,26 @@ async def pub_buttons(update: Update, ctx, parts):
         pub["cap"] = None
         await _ask_cap(q.message, ctx)
         return
-    if act == "pubgo":
+    if act in ("pubgo", "pubgoplain"):
         if not pub.get("cap"):
             return
         ref = store.get("post_chan")
+        ents_all = pub["ents"]
+        has_ce = any(d.get("type") == "custom_emoji" for d in ents_all)
+        use = [d for d in ents_all if d.get("type") != "custom_emoji"] if act == "pubgoplain" else ents_all
         try:
             chat = int(ref) if ref.lstrip("-").isdigit() else ref
-            await ctx.bot.send_media_group(chat, _pub_media(ctx.bot, pub, pub["cap"], pub["ents"]))
+            await ctx.bot.send_media_group(chat, _pub_media(ctx.bot, pub, pub["cap"], use))
             store.log("channel_post", update.effective_user.id, pub["code"])
             ctx.user_data.pop("pub", None)
-            await q.message.reply_text("✅ اننشر بالقناة.")
+            await q.message.reply_text("✅ اننشر بالقناة." + (" (الإيموجي المتحرك نزلت إيموجي عادي)" if act == "pubgoplain" and has_ce else ""))
         except Exception as e:
-            await q.message.reply_text("فشل النشر: " + str(e)[:150])
+            if has_ce and act == "pubgo":
+                await q.message.reply_text(
+                    "تلكرام رفض النشر بالقناة بالإيموجي المتحرك: " + str(e)[:120] + "\nغالباً بوتات القنوات ما تدعم الإيموجي المتحرك، أو حساب مالك البوت بدون Premium. تنشره بإيموجي عادي بدلها؟",
+                    reply_markup=M([[B("نشر بإيموجي عادي", callback_data="n:pubgoplain"), B("❌ إلغاء", callback_data="n:pubcancel")]]))
+            else:
+                await q.message.reply_text("فشل النشر: " + str(e)[:150])
         return
 
 
@@ -541,13 +549,27 @@ async def pub_preview(update, ctx, text, ents):
         await m.reply_text(f"الوصف طويل ({_u16(cap)}). الحد 1024 حرف، أرسل وصفاً أقصر لهذه المرة.")
         return
     pub["cap"], pub["ents"] = cap, ents2
+    has_ce = any(e.get("type") == "custom_emoji" for e in ents2)
+    pub["plain"] = False
+    note = ""
     try:
         await ctx.bot.send_media_group(update.effective_chat.id, _pub_media(ctx.bot, pub, cap, ents2))
+        if has_ce:
+            note = "\n✅ الإيموجي المتحرك قبلها تلكرام بالمعاينة."
     except Exception as e:
-        ctx.user_data["await"] = "pcap"
-        await m.reply_text("فشلت المعاينة: " + str(e)[:150])
-        return
-    warn = "" if ents2 and any(e.get("type") == "text_link" and e.get("url") == url for e in ents2) else "\n⚠️ ما كو نص بين علامتين # فما كو رابط بالمنشور."
+        if not has_ce:
+            ctx.user_data["await"] = "pcap"
+            await m.reply_text("فشلت المعاينة: " + str(e)[:150])
+            return
+        plain = [d for d in ents2 if d.get("type") != "custom_emoji"]
+        try:
+            await ctx.bot.send_media_group(update.effective_chat.id, _pub_media(ctx.bot, pub, cap, plain))
+        except Exception as e2:
+            ctx.user_data["await"] = "pcap"
+            await m.reply_text("فشلت المعاينة: " + str(e2)[:150])
+            return
+        note = "\n⚠️ تلكرام رفض الإيموجي المتحرك (لازم حساب مالك البوت يكون عنده Premium)، والمعاينة فوق بإيموجي عادي."
+    warn = note + ("" if ents2 and any(e.get("type") == "text_link" and e.get("url") == url for e in ents2) else "\n⚠️ ما كو نص بين علامتين # فما كو رابط بالمنشور.")
     await m.reply_text(f"هذي المعاينة. تنشر بقناة {store.get('post_chan_name') or ''}؟{warn}",
                        reply_markup=M([[B("✅ نشر", callback_data="n:pubgo"), B("✏️ وصف آخر لهذه المرة", callback_data="n:pubcap2")],
                                        [B("❌ إلغاء", callback_data="n:pubcancel")]]))
@@ -609,7 +631,7 @@ async def pub_input(update: Update, ctx, key):
 
 
 async def link_buttons(update: Update, ctx, parts):
-    if parts[1] in ("pub", "pubdone", "pubgo", "pubcancel", "pchan", "pubcap2", "pcapset"):
+    if parts[1] in ("pub", "pubdone", "pubgo", "pubcancel", "pchan", "pubcap2", "pcapset", "pubgoplain"):
         await pub_buttons(update, ctx, parts)
         return
     q = update.callback_query
