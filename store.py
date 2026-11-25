@@ -5,6 +5,8 @@ DEFAULTS = {
     "delay": "30",
     "protect": "0",
     "note": "⏳ ستنحذف هذه الرسائل بعد {s}.\nأعد توجيهها أو احفظها قبل الحذف.",
+    "blur": "3",
+    "lock_msg": "🔒 هذا المحتوى مقفول.\nلفتح الصور والفيديوهات لازم تدعو {n} أشخاص عبر رابطك الخاص:\n{link}\n\nدعوت لحد الآن: {have} من {n}",
     "deleted_note": "🗑 تم حذف المحتوى.",
     "maintenance": "0",
     "notify_join": "1",
@@ -30,11 +32,12 @@ class Store:
         self.q("CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT)")
         self.q("CREATE TABLE IF NOT EXISTS channels(id INTEGER PRIMARY KEY AUTOINCREMENT, ref TEXT UNIQUE, enabled INTEGER DEFAULT 1)")
         self.q("CREATE TABLE IF NOT EXISTS links(code TEXT PRIMARY KEY, items TEXT, created REAL, views INTEGER DEFAULT 0)")
-        for col, typ in (("name", "TEXT"), ("delay", "INTEGER"), ("note", "TEXT")):
+        for col, typ in (("name", "TEXT"), ("delay", "INTEGER"), ("note", "TEXT"), ("need", "INTEGER")):
             try:
                 self.q(f"ALTER TABLE links ADD COLUMN {col} {typ}")
             except sqlite3.OperationalError:
                 pass
+        self.q("CREATE TABLE IF NOT EXISTS invites(code TEXT, inviter INTEGER, invited INTEGER, ts REAL, PRIMARY KEY(code, invited))")
         self.q("CREATE TABLE IF NOT EXISTS pending(id INTEGER PRIMARY KEY AUTOINCREMENT, chat INTEGER, ids TEXT, at REAL)")
         self.q("CREATE TABLE IF NOT EXISTS log(ts REAL, kind TEXT, uid INTEGER, text TEXT)")
 
@@ -142,11 +145,11 @@ class Store:
         self.q("INSERT INTO links(code,items,created,name) VALUES(?,?,?,?)", (code, json.dumps(items), time.time(), name))
 
     def link_meta(self, code):
-        r = self.q("SELECT name,delay,note,views FROM links WHERE code=?", (code,), one=True)
-        return {"name": r[0] or "", "delay": r[1], "note": r[2], "views": r[3]} if r else None
+        r = self.q("SELECT name,delay,note,views,need FROM links WHERE code=?", (code,), one=True)
+        return {"name": r[0] or "", "delay": r[1], "note": r[2], "views": r[3], "need": r[4] or 0} if r else None
 
     def update_link(self, code, field, value):
-        assert field in ("name", "delay", "note")
+        assert field in ("name", "delay", "note", "need")
         self.q(f"UPDATE links SET {field}=? WHERE code=?", (value, code))
 
     def get_link(self, code):
@@ -179,3 +182,20 @@ class Store:
             self.db.backup(dst)
             dst.close()
             self.dirty = False
+
+    def set_items(self, code, items):
+        self.q("UPDATE links SET items=? WHERE code=?", (json.dumps(items), code))
+
+    def add_invite(self, code, inviter, invited):
+        """True if this invited user is newly counted for this link."""
+        r = self.q("SELECT 1 FROM invites WHERE code=? AND invited=?", (code, invited), one=True)
+        if r:
+            return False
+        self.q("INSERT INTO invites(code,inviter,invited,ts) VALUES(?,?,?,?)", (code, inviter, invited, time.time()))
+        return True
+
+    def invite_count(self, code, inviter):
+        return self.q("SELECT COUNT(*) FROM invites WHERE code=? AND inviter=?", (code, inviter), one=True)[0]
+
+    def invite_total(self, code):
+        return self.q("SELECT COUNT(*) FROM invites WHERE code=?", (code,), one=True)[0]
