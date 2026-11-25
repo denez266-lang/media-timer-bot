@@ -322,7 +322,7 @@ async def deliver_to(bot, chat_id, uid, code):
     note_txt = meta["note"] or ""
     protect = meta["protect"]
     ids = []
-    for it in items:
+    async def one(it):
         fn = {"photo": bot.send_photo, "video": bot.send_video,
               "animation": bot.send_animation, "document": bot.send_document}[it["t"]]
         try:
@@ -330,6 +330,31 @@ async def deliver_to(bot, chat_id, uid, code):
             ids.append(m.message_id)
         except TelegramError as e:
             logging.warning("send failed: %s", e)
+
+    # Group runs of photos/videos (mixed) into albums of up to 10, and runs of documents separately.
+    # Animations can't go in albums. Order is kept.
+    runs = []
+    for it in items:
+        kind = "pv" if it["t"] in ("photo", "video") else ("doc" if it["t"] == "document" else "anim")
+        if runs and runs[-1][0] == kind and kind != "anim":
+            runs[-1][1].append(it)
+        else:
+            runs.append((kind, [it]))
+    for kind, run in runs:
+        for i in range(0, len(run), 10):
+            chunk = run[i:i + 10]
+            if len(chunk) == 1 or kind == "anim":
+                for it in chunk:
+                    await one(it)
+                continue
+            cls = {"photo": InputMediaPhoto, "video": InputMediaVideo, "document": InputMediaDocument}
+            try:
+                res = await bot.send_media_group(chat_id, [cls[it["t"]](it["f"]) for it in chunk], protect_content=protect)
+                ids.extend(m.message_id for m in res)
+            except TelegramError as e:
+                logging.warning("album send failed, falling back to single sends: %s", e)
+                for it in chunk:
+                    await one(it)
     n = await bot.send_message(chat_id, note_txt.replace("{s}", fmt_dur(delay)).replace("{t}", fmt_dur(delay)), protect_content=protect)
     ids.append(n.message_id)
     at = time.time() + delay
