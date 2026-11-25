@@ -256,7 +256,7 @@ def blur_bytes(raw, strength, duration=None):
     else:
         im = Image.open(io.BytesIO(raw)).convert("RGB")
         im.thumbnail((1280, 1280))
-        radius = max(2.0, max(im.size) * 0.006 * strength)
+        radius = max(1.0, max(im.size) * 0.002 * strength)
         im = im.filter(ImageFilter.GaussianBlur(radius))
     if duration is not None:
         d = ImageDraw.Draw(im, "RGBA")
@@ -287,11 +287,11 @@ async def make_blurs(bot, items, strength=None):
     strength = int(strength or store.get("blur") or 3)
     admin = min(ADMIN_IDS)
     for it in items:
-        if "b" in it and it.get("bs") == strength:
+        if "b" in it and it.get("bs") == f"{strength}v2":
             continue
         src = it.get("th") or (it["f"] if it["t"] == "photo" else None)
         it["b"] = None
-        it["bs"] = strength
+        it["bs"] = f"{strength}v2"
         isvid = it["t"] in ("video", "animation")
         if not src and not isvid:
             continue
@@ -342,7 +342,7 @@ async def deliver_to(bot, chat_id, uid, code):
 async def send_locked(bot, chat_id, uid, code, need):
     items, _v = store.get_link(code)
     strength = int(store.link_meta(code)["blur"] or 3)
-    if any(it.get("bs") != strength for it in items):
+    if any(it.get("bs") != f"{strength}v2" for it in items):
         items = await make_blurs(bot, items, strength)
         store.set_items(code, items)
     blurred = [it["b"] for it in items if it.get("b")][:10]
