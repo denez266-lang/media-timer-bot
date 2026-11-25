@@ -1,7 +1,7 @@
 import os, time, asyncio, logging, datetime
 import json, secrets, tempfile, io
 from urllib.parse import quote
-from telegram import InputMediaPhoto
+from telegram import InputMediaPhoto, InputMediaDocument
 import httpx
 from telegram import InlineKeyboardButton as B, InlineKeyboardMarkup as M, Update
 from telegram.error import TelegramError
@@ -230,33 +230,68 @@ async def delete_later(bot, chat_id, ids, at):
     store.del_pending(chat_id, ids)
 
 
-def blur_bytes(raw, strength):
-    from PIL import Image, ImageFilter
-    im = Image.open(io.BytesIO(raw)).convert("RGB")
-    im.thumbnail((1280, 1280))
-    radius = max(2.0, max(im.size) * 0.006 * strength)
-    im = im.filter(ImageFilter.GaussianBlur(radius))
+def fmt_clock(sec):
+    sec = int(sec or 0)
+    h, r = divmod(sec, 3600)
+    m, s_ = divmod(r, 60)
+    return f"{h}:{m:02d}:{s_:02d}" if h else f"{m}:{s_:02d}"
+
+
+def blur_bytes(raw, strength, duration=None):
+    from PIL import Image, ImageFilter, ImageDraw, ImageFont
+    if raw is None:
+        im = Image.new("RGB", (640, 360), (40, 40, 40))
+    else:
+        im = Image.open(io.BytesIO(raw)).convert("RGB")
+        im.thumbnail((1280, 1280))
+        radius = max(2.0, max(im.size) * 0.006 * strength)
+        im = im.filter(ImageFilter.GaussianBlur(radius))
+    if duration is not None:
+        d = ImageDraw.Draw(im, "RGBA")
+        w, h = im.size
+        size = max(28, min(w, h) // 6)
+        try:
+            font = ImageFont.load_default(size=size)
+        except TypeError:
+            font = ImageFont.load_default()
+        txt = fmt_clock(duration)
+        box = d.textbbox((0, 0), txt, font=font)
+        tw, th_ = box[2] - box[0], box[3] - box[1]
+        x, y = (w - tw) // 2, (h - th_) // 2
+        pad = size // 3
+        d.rounded_rectangle((x - pad - size, y - pad, x + tw + pad, y + th_ + pad * 2), radius=pad, fill=(0, 0, 0, 150))
+        tx, ty = x - size - pad // 2, y + th_ // 2 + 2
+        r = size // 2
+        d.polygon([(tx + r // 2, ty - r), (tx + r // 2, ty + r), (tx + r // 2 + int(r * 1.5), ty)], fill=(255, 255, 255, 230))
+        d.text((x - box[0], y - box[1]), txt, font=font, fill=(255, 255, 255, 255))
     out = io.BytesIO()
     im.save(out, "JPEG", quality=80)
     out.seek(0)
     return out
 
 
-async def make_blurs(bot, items):
+async def make_blurs(bot, items, strength=None):
     """Adds item['b'] (file_id of a blurred preview, or None). Uses the admin chat to obtain a file_id."""
-    strength = int(store.get("blur") or 3)
+    strength = int(strength or store.get("blur") or 3)
     admin = min(ADMIN_IDS)
     for it in items:
-        if "b" in it:
+        if "b" in it and it.get("bs") == strength:
             continue
         src = it.get("th") or (it["f"] if it["t"] == "photo" else None)
         it["b"] = None
-        if not src:
+        it["bs"] = strength
+        isvid = it["t"] in ("video", "animation")
+        if not src and not isvid:
             continue
         try:
-            f = await bot.get_file(src)
-            raw = bytes(await f.download_as_bytearray())
-            bio = await asyncio.to_thread(blur_bytes, raw, strength)
+            raw = None
+            if src:
+                f = await bot.get_file(src)
+                raw = bytes(await f.download_as_bytearray())
+            dur = it.get("dur") if isvid and it.get("dur") is not None else None
+            if raw is None and dur is None:
+                continue
+            bio = await asyncio.to_thread(blur_bytes, raw, strength, dur)
             m = await bot.send_photo(admin, bio, disable_notification=True)
             it["b"] = m.photo[-1].file_id
             try:
@@ -294,8 +329,9 @@ async def deliver_to(bot, chat_id, uid, code):
 
 async def send_locked(bot, chat_id, uid, code, need):
     items, _v = store.get_link(code)
-    if any("b" not in it for it in items):
-        items = await make_blurs(bot, items)
+    strength = int(store.link_meta(code)["blur"] or store.get("blur") or 3)
+    if any(it.get("bs") != strength for it in items):
+        items = await make_blurs(bot, items, strength)
         store.set_items(code, items)
     blurred = [it["b"] for it in items if it.get("b")][:10]
     try:
@@ -378,6 +414,9 @@ async def link_buttons(update: Update, ctx, parts):
     elif act == "show":
         t, m = screen("link:" + parts[2], ctx)
         await q.message.reply_text(t, reply_markup=m)
+    elif act == "blur":
+        ctx.user_data["await"] = "lblur:" + parts[2]
+        await q.message.reply_text("أرسل قوة التغبيش لهذا الرابط من 1 (خفيف) إلى 10 (قوي). أرسل 0 لاستخدام الافتراضي:\n(/cancel للإلغاء)")
     elif act == "need":
         ctx.user_data["await"] = "lneed:" + parts[2]
         await q.message.reply_text("كم شخص لازم يدعو المستخدم حتى يفتح المحتوى؟ أرسل رقم (0 = بدون قفل):\n(/cancel للإلغاء)")
@@ -411,6 +450,10 @@ async def collect_media(update: Update, ctx):
     if obj is not None and getattr(obj, "thumbnail", None):
         th = obj.thumbnail.file_id
     item = {"t": t, "f": f}
+    if m.video:
+        item["dur"] = int(m.video.duration or 0)
+    elif m.animation:
+        item["dur"] = int(m.animation.duration or 0)
     if th:
         item["th"] = th
     col.append(item)
@@ -427,17 +470,31 @@ async def backup_loop(app):
             chat_id = min(ADMIN_IDS)
             tmp = tempfile.mktemp(suffix=".db")
             await asyncio.to_thread(store.snapshot, tmp)
-            with open(tmp, "rb") as f:
-                m = await app.bot.send_document(chat_id, f, filename="backup.db",
-                                                caption="💾 نسخة البيانات (لا تحذفها)", disable_notification=True)
-            os.remove(tmp)
-            await app.bot.pin_chat_message(chat_id, m.message_id, disable_notification=True)
-            old, BACKUP["msg"] = BACKUP["msg"], m.message_id
-            if old:
+            done = False
+            if BACKUP["msg"]:
                 try:
-                    await app.bot.delete_message(chat_id, old)
-                except TelegramError:
-                    pass
+                    with open(tmp, "rb") as f:
+                        await app.bot.edit_message_media(
+                            InputMediaDocument(f, filename="backup.db", caption="💾 نسخة البيانات (لا تحذفها)"),
+                            chat_id=chat_id, message_id=BACKUP["msg"])
+                    done = True
+                except TelegramError as e:
+                    if "not modified" in str(e).lower():
+                        done = True
+                    else:
+                        logging.warning("backup edit failed, sending new: %s", e)
+            if not done:
+                with open(tmp, "rb") as f:
+                    m = await app.bot.send_document(chat_id, f, filename="backup.db",
+                                                    caption="💾 نسخة البيانات (لا تحذفها)", disable_notification=True)
+                await app.bot.pin_chat_message(chat_id, m.message_id, disable_notification=True)
+                old, BACKUP["msg"] = BACKUP["msg"], m.message_id
+                if old:
+                    try:
+                        await app.bot.delete_message(chat_id, old)
+                    except TelegramError:
+                        pass
+            os.remove(tmp)
         except Exception as e:
             store.dirty = True
             logging.warning("backup failed: %s", e)
@@ -501,11 +558,12 @@ def screen(name, ctx):
         txt = (f"🔗 {meta['name'] or c}\n\nالرابط:\nhttps://t.me/{ctx.bot.username}?start={c}\n\n"
                f"الملفات: {len(got[0])} | المشاهدات: {meta['views']}\n"
                f"👥 الدعوات المطلوبة: {meta['need'] or 'بدون قفل'} (دعوات مسجلة: {s.invite_total(c)})\n"
+               f"🌫 قوة التغبيش: {meta['blur'] or (str(s.get('blur')) + ' (الافتراضي)')}\n"
                f"مدة الحذف: {dtxt}\nالرسالة:\n{ntxt}")
         return txt, M([
             [B("✏️ الاسم", callback_data=f"n:name:{c}"), B("⏱ المدة", callback_data=f"n:time:{c}")],
             [B("💬 الرسالة", callback_data=f"n:msg:{c}"), B("♻️ رجّع الرسالة/المدة للافتراضي", callback_data=f"n:reset:{c}")],
-            [B("👥 الدعوات المطلوبة", callback_data=f"n:need:{c}")],
+            [B("👥 الدعوات المطلوبة", callback_data=f"n:need:{c}"), B("🌫 التغبيش", callback_data=f"n:blur:{c}")],
             [B("🗑 حذف الرابط", callback_data=f"n:del:{c}")], back("links")])
     if name == "stats":
         total, day, active, banned = s.stats()
@@ -585,7 +643,7 @@ PROMPTS = {
     "ban": "أرسل ID المستخدم للحظر:", "unban": "أرسل ID المستخدم لفك الحظر:",
     "channel_add": "أرسل يوزر القناة مثل @name (وأضف البوت أدمن فيها):",
     "broadcast": "أرسل نص الرسالة الجماعية:",
-    "blur": "أرسل قوة التغبيش من 1 (خفيف) إلى 10 (قوي). تنطبق على الروابط الجديدة:",
+    "blur": "أرسل قوة التغبيش من 1 (خفيف) إلى 10 (قوي). الافتراضي للروابط اللي ما إلها تغبيش خاص:",
     "lock_msg": "أرسل رسالة القفل. استخدم {n} للعدد المطلوب، {have} لما دعاه، {link} لرابطه الشخصي:",
     "delay": "أرسل مدة الحذف الافتراضية. مثال: 30 أو 2 دقيقة:",
     "note": "أرسل نص رسالة التنبيه. استخدم {s} مكان عدد الثواني:",
@@ -661,12 +719,18 @@ async def admin_input(update: Update, ctx) -> bool:
     text = update.message.text.strip()
     s = store
     uid = update.effective_user.id
-    if key.startswith(("lname:", "ldelay:", "lnote:", "lneed:")):
+    if key.startswith(("lname:", "ldelay:", "lnote:", "lneed:", "lblur:")):
         kind, code = key.split(":", 1)
         if not s.link_meta(code):
             await update.message.reply_text("الرابط غير موجود.")
             return True
-        if kind == "lneed":
+        if kind == "lblur":
+            if not text.isdigit() or int(text) > 10:
+                ctx.user_data["await"] = key
+                await update.message.reply_text("رقم من 1 إلى 10 (أو 0 للافتراضي).")
+                return True
+            s.update_link(code, "blur", int(text) or None)
+        elif kind == "lneed":
             if not text.isdigit() or int(text) > 1000:
                 ctx.user_data["await"] = key
                 await update.message.reply_text("أرسل رقم فقط (0 بدون قفل).")
@@ -700,7 +764,7 @@ async def admin_input(update: Update, ctx) -> bool:
     if key == "blur":
         if text.isdigit() and 1 <= int(text) <= 10:
             s.set("blur", text)
-            await update.message.reply_text("✔️ تم. تنطبق على الروابط الجديدة.")
+            await update.message.reply_text("✔️ تم. هذا الافتراضي للروابط اللي ما إلها تغبيش خاص.")
         else:
             await update.message.reply_text("رقم من 1 إلى 10.")
         return True
