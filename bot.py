@@ -920,6 +920,29 @@ async def update_counter(ctx, chat_id, col):
     """One counter message, edited in place as files are added (edits are spaced out to avoid Telegram flood limits)."""
     ud = ctx.user_data
     kb = M([[B("✅ إنهاء وإنشاء الرابط", callback_data="n:done")]])
+    ud["cadd"] = time.time()
+    if not ud.get("cwatch"):
+        ud["cwatch"] = True
+
+        async def watch():
+            try:
+                while True:
+                    await asyncio.sleep(1.5)
+                    if time.time() - ud.get("cadd", 0) < 1.5 or ud.get("cpend"):
+                        continue
+                    n = len(ud.get("collect") or [])
+                    if not ud.get("cmsg") or not n:
+                        return
+                    try:
+                        await ctx.bot.edit_message_text(f"✅ تمت إضافة الكل ({n})", chat_id=chat_id, message_id=ud["cmsg"], reply_markup=kb)
+                        ud["cshown"] = n
+                    except TelegramError as e:
+                        logging.warning("counter done edit: %s", e)
+                    return
+            finally:
+                ud["cwatch"] = False
+
+        asyncio.create_task(watch())
     if not ud.get("cmsg"):
         sent = await ctx.bot.send_message(chat_id, f"➕ أضفت ({len(col)})", reply_markup=kb)
         ud["cmsg"] = sent.message_id
