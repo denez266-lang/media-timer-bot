@@ -32,7 +32,7 @@ class Store:
         self.q("CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT)")
         self.q("CREATE TABLE IF NOT EXISTS channels(id INTEGER PRIMARY KEY AUTOINCREMENT, ref TEXT UNIQUE, enabled INTEGER DEFAULT 1)")
         self.q("CREATE TABLE IF NOT EXISTS links(code TEXT PRIMARY KEY, items TEXT, created REAL, views INTEGER DEFAULT 0)")
-        for col, typ in (("name", "TEXT"), ("delay", "INTEGER"), ("note", "TEXT"), ("need", "INTEGER")):
+        for col, typ in (("name", "TEXT"), ("delay", "INTEGER"), ("note", "TEXT"), ("need", "INTEGER"), ("blur", "INTEGER")):
             try:
                 self.q(f"ALTER TABLE links ADD COLUMN {col} {typ}")
             except sqlite3.OperationalError:
@@ -145,11 +145,11 @@ class Store:
         self.q("INSERT INTO links(code,items,created,name) VALUES(?,?,?,?)", (code, json.dumps(items), time.time(), name))
 
     def link_meta(self, code):
-        r = self.q("SELECT name,delay,note,views,need FROM links WHERE code=?", (code,), one=True)
-        return {"name": r[0] or "", "delay": r[1], "note": r[2], "views": r[3], "need": r[4] or 0} if r else None
+        r = self.q("SELECT name,delay,note,views,need,blur FROM links WHERE code=?", (code,), one=True)
+        return {"name": r[0] or "", "delay": r[1], "note": r[2], "views": r[3], "need": r[4] or 0, "blur": r[5]} if r else None
 
     def update_link(self, code, field, value):
-        assert field in ("name", "delay", "note", "need")
+        assert field in ("name", "delay", "note", "need", "blur")
         self.q(f"UPDATE links SET {field}=? WHERE code=?", (value, code))
 
     def get_link(self, code):
