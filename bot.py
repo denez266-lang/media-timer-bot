@@ -505,14 +505,11 @@ async def pub_buttons(update: Update, ctx, parts):
         if not pub["media"]:
             await q.message.reply_text("أرسل صورة وحدة على الأقل أول.")
             return
-        if store.get("pub_cap"):
-            try:
-                te = json.loads(store.get("pub_ents") or "[]")
-            except Exception:
-                te = []
-            await pub_preview(update, ctx, store.get("pub_cap"), te)
-            return
-        await _ask_cap(q.message, ctx)
+        await _ask_top(q.message, ctx)
+        return
+    if act == "pubskip":
+        ctx.user_data.pop("await", None)
+        await _pub_after_top(update, ctx, q.message)
         return
     if act == "pubcap2":
         pub["cap"] = None
@@ -585,6 +582,27 @@ async def pub_buttons(update: Update, ctx, parts):
             else:
                 await q.message.reply_text("فشل النشر: " + str(e)[:150])
         return
+
+
+async def _ask_top(msg, ctx):
+    ctx.user_data["await"] = "ptop"
+    pub = ctx.user_data.get("pub") or {}
+    cur = pub.get("fwd_line")
+    await msg.reply_text(
+        "اختياري: أرسل أو حوّل رسالة نص (من أي مصدر) وآخذ أول سطر منها فقط كسطر علوي بالمنشور، ويحط وصفك الثابت تحته. آخذ النص بس، مو الصور.\n"
+        + (f"\nالسطر الحالي: {cur[0]}\n" if cur else "") + "أو اضغط تخطي.",
+        reply_markup=M([[B("⏭ تخطي", callback_data="n:pubskip"), B("❌ إلغاء", callback_data="n:pubcancel")]]))
+
+
+async def _pub_after_top(update, ctx, msg):
+    if store.get("pub_cap"):
+        try:
+            te = json.loads(store.get("pub_ents") or "[]")
+        except Exception:
+            te = []
+        await pub_preview(update, ctx, store.get("pub_cap"), te)
+        return
+    await _ask_cap(msg, ctx)
 
 
 async def _ask_cap(msg, ctx):
@@ -744,6 +762,16 @@ async def pub_input(update: Update, ctx, key):
         if pub and pub.pop("need_chan", None):
             await _pub_ask_media(m)
         return True
+    if key == "ptop" and pub:
+        fl = _first_line(m.text or "", [e.to_dict() for e in (m.entities or [])])
+        if not fl:
+            ctx.user_data["await"] = "ptop"
+            await m.reply_text("ما لقيت نص. أرسل رسالة فيها نص، أو اضغط تخطي.")
+            return True
+        pub["fwd_line"] = fl
+        await m.reply_text("✔️ السطر العلوي: " + fl[0])
+        await _pub_after_top(update, ctx, m)
+        return True
     if key == "pcapset":
         text = m.text or ""
         if _u16(text) > 1000:
@@ -767,7 +795,7 @@ async def pub_input(update: Update, ctx, key):
 
 
 async def link_buttons(update: Update, ctx, parts):
-    if parts[1] in ("pub", "pubdone", "pubgo", "pubcancel", "pchan", "pubcap2", "pcapset", "pubgoplain", "pubdel", "pubkeep"):
+    if parts[1] in ("pub", "pubdone", "pubgo", "pubcancel", "pchan", "pubcap2", "pcapset", "pubgoplain", "pubdel", "pubkeep", "pubskip"):
         await pub_buttons(update, ctx, parts)
         return
     q = update.callback_query
@@ -861,6 +889,24 @@ async def collect_media(update: Update, ctx):
     if not is_admin(update.effective_user):
         return
     pub = ctx.user_data.get("pub")
+    if pub is not None and ctx.user_data.get("await") == "ptop":
+        m = update.message
+        fl = _first_line(m.caption or "", [e.to_dict() for e in (m.caption_entities or [])])
+        if m.media_group_id is not None and pub.get("toprej") == m.media_group_id:
+            return
+        if not fl:
+            pub["toprej"] = m.media_group_id
+            await m.reply_text("هذي الرسالة ما فيها نص. أرسل نص أو اضغط تخطي. (ما آخذ صور من هنا.)")
+            return
+        pub["fwd_line"] = fl
+        ctx.user_data.pop("await", None)
+        pub["toprej"] = m.media_group_id
+        await m.reply_text("✔️ السطر العلوي: " + fl[0] + "\n(أخذت النص بس، الصور ما انضافت.)")
+        await _pub_after_top(update, ctx, m)
+        return
+    pub = ctx.user_data.get("pub")
+    if pub is not None and update.message.media_group_id is not None and pub.get("toprej") == update.message.media_group_id:
+        return  # rest of an album whose caption was already taken as the top line
     if pub is not None and not ctx.user_data.get("await") and not pub.get("cap"):
         m = update.message
         if not _fwd_own(m):
@@ -1545,7 +1591,7 @@ async def admin_input(update: Update, ctx) -> bool:
     if not key or not is_admin(update.effective_user):
         return False
     ctx.user_data.pop("await")
-    if key in ("pcap", "pchan", "pcapset"):
+    if key in ("pcap", "pchan", "pcapset", "ptop"):
         return await pub_input(update, ctx, key)
     if key == "restore":
         await update.message.reply_text("أرسل ملف النسخة كمستند، مو نص. ابدأ من جديد من 💾 النسخ الاحتياطي.")
