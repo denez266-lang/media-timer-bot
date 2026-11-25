@@ -412,19 +412,16 @@ def _u16(s):
 
 
 def build_caption(text, ents, url):
-    """[word] in the text becomes a clickable link to url (brackets removed). No brackets: appends a link line.
+    """#word# in the text becomes a clickable link to url (the # marks removed). No marks: text is posted exactly as written.
     Other entities (bold, premium emoji...) are kept and shifted."""
-    pairs = list(_re.finditer(r"\[([^\[\]\n]+)\]", text))
+    pairs = list(_re.finditer(r"#(\S(?:[^#\n]*?\S)?)#", text))
     out = [dict(e) for e in (ents or [])]
     if not pairs:
-        sep = "\n\n" if text else ""
-        pre = text + sep + "👉 "
-        out.append({"type": "text_link", "offset": _u16(pre), "length": _u16("اضغط هنا"), "url": url})
-        return pre + "اضغط هنا", out
+        return text, out
     removed = []
     for m in pairs:
         removed += [_u16(text[:m.start()]), _u16(text[:m.end() - 1])]
-    new_text = _re.sub(r"\[([^\[\]\n]+)\]", lambda m: m.group(1), text)
+    new_text = _re.sub(r"#(\S(?:[^#\n]*?\S)?)#", lambda m: m.group(1), text)
 
     def new_off(o):
         return o - sum(1 for r in removed if r < o)
@@ -462,7 +459,7 @@ async def pub_buttons(update: Update, ctx, parts):
     if act == "pcapset":
         ctx.user_data["await"] = "pcapset"
         cur = store.get("pub_cap")
-        await q.message.reply_text("أرسل وصف النشر الثابت (يُستخدم بكل رابط). اكتب [كلمة] بين أقواس لتصير رابط الرابط تلقائياً.\n"
+        await q.message.reply_text("أرسل وصف النشر الثابت (يُستخدم بكل رابط). النص الي تريده يصير رابط اكتبه بين علامتين #، مثل:\nشاهد المحتوى كامل #اضغط هنا#\nوتظهر \"اضغط هنا\" رابط يفتح البوت بالرابط. بدون # ينشر وصفك مثل ما كتبته بدون رابط.\n"
                                    + (f"\nالحالي:\n{cur}\n" if cur else "") + "(/cancel للإلغاء)")
         return
     if act == "pubcancel":
@@ -521,8 +518,8 @@ async def pub_buttons(update: Update, ctx, parts):
 async def _ask_cap(msg, ctx):
     ctx.user_data["await"] = "pcap"
     await msg.reply_text(
-        "أرسل الوصف. اكتب الكلمة الي تريدها رابط بين أقواس، مثل:\nشاهد المحتوى كامل [اضغط هنا]\nوتصير [اضغط هنا] رابط يفتح البوت على هذا الرابط. "
-        "إذا ما حطيت أقواس يضيف بالنهاية 👉 اضغط هنا.\nأول وصف ترسله ينحفظ ثابت لكل الروابط.\n(/cancel للإلغاء)")
+        "أرسل الوصف. النص الي تريده يصير رابط اكتبه بين علامتين #، مثل:\nشاهد المحتوى كامل #اضغط هنا#\nوتظهر \"اضغط هنا\" رابط يفتح البوت بالرابط الي أنشأته. "
+        "بدون # ينشر وصفك مثل ما كتبته بدون أي رابط.\nأول وصف ترسله ينحفظ ثابت لكل الروابط.\n(/cancel للإلغاء)")
 
 
 async def _pub_ask_media(msg):
@@ -547,7 +544,8 @@ async def pub_preview(update, ctx, text, ents):
         ctx.user_data["await"] = "pcap"
         await m.reply_text("فشلت المعاينة: " + str(e)[:150])
         return
-    await m.reply_text(f"هذي المعاينة. تنشر بقناة {store.get('post_chan_name') or ''}؟",
+    warn = "" if ents2 and any(e.get("type") == "text_link" and e.get("url") == url for e in ents2) else "\n⚠️ ما كو نص بين علامتين # فما كو رابط بالمنشور."
+    await m.reply_text(f"هذي المعاينة. تنشر بقناة {store.get('post_chan_name') or ''}؟{warn}",
                        reply_markup=M([[B("✅ نشر", callback_data="n:pubgo"), B("✏️ وصف آخر لهذه المرة", callback_data="n:pubcap2")],
                                        [B("❌ إلغاء", callback_data="n:pubcancel")]]))
 
@@ -593,7 +591,7 @@ async def pub_input(update: Update, ctx, key):
             return True
         store.set("pub_cap", text)
         store.set("pub_ents", json.dumps([e.to_dict() for e in (m.entities or [])]))
-        await m.reply_text("✅ انحفظ الوصف الثابت. يُستخدم بكل رابط عند النشر (فيه [كلمة] تصير رابط الرابط تلقائياً).")
+        await m.reply_text("✅ انحفظ الوصف الثابت. يُستخدم بكل رابط عند النشر (النص بين علامتين # يصير رابط الرابط تلقائياً).")
         return True
     if key == "pcap" and pub:
         text = m.text or ""
