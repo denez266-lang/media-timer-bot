@@ -9,6 +9,10 @@ DEFAULTS = {
     "lock_msg": "🔒 هذا المحتوى مقفول.\nلفتح الصور والفيديوهات لازم تدعو {n} أشخاص عبر رابطك الخاص:\n{link}\n\nدعوت لحد الآن: {have} من {n}",
     "deleted_note": "🗑 تم حذف المحتوى.",
     "maintenance": "0",
+    "bc_aud": "",
+    "bc_silent": "0",
+    "bc_ttl": "0",
+    "bc_btn": "",
     "notify_join": "1",
     "ban_notice": "1",
     "ban_msg": "🚫 تم حظرك من استخدام البوت.",
@@ -89,6 +93,20 @@ class Store:
     def all_user_ids(self, include_banned=False):
         sql = "SELECT id FROM users" + ("" if include_banned else " WHERE banned=0")
         return [r[0] for r in self.q(sql, many=True)]
+
+    SEG_SQL = {"new7": "joined>{t7}", "new30": "joined>{t30}", "off7": "last_seen<{t7}", "off30": "last_seen<{t30}"}
+
+    def audience_ids(self, aud=""):
+        """aud: comma list of segments (union). Empty = everyone not banned."""
+        now = time.time()
+        segs = [x for x in (aud or "").split(",") if x in self.SEG_SQL]
+        cond = ""
+        if segs:
+            cond = " AND (" + " OR ".join(self.SEG_SQL[x].format(t7=now - 7 * 86400, t30=now - 30 * 86400) for x in segs) + ")"
+        return [r[0] for r in self.q("SELECT id FROM users WHERE banned=0" + cond, many=True)]
+
+    def bc_log(self, n=10):
+        return self.q("SELECT ts,text FROM log WHERE kind='broadcast' ORDER BY ts DESC LIMIT ?", (n,), many=True)
 
     def is_banned(self, uid):
         r = self.q("SELECT banned FROM users WHERE id=?", (uid,), one=True)
