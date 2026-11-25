@@ -4,7 +4,7 @@ DEFAULTS = {
     "welcome": "أهلاً! استخدم رابط دعوة صالح لاستلام المحتوى.",
     "delay": "30",
     "protect": "0",
-    "note": "⏳ ستنحذف هذه الرسائل بعد {s} ثانية.\nأعد توجيهها أو احفظها قبل الحذف.",
+    "note": "⏳ ستنحذف هذه الرسائل بعد {s}.\nأعد توجيهها أو احفظها قبل الحذف.",
     "deleted_note": "🗑 تم حذف المحتوى.",
     "maintenance": "0",
     "notify_join": "1",
@@ -30,6 +30,11 @@ class Store:
         self.q("CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT)")
         self.q("CREATE TABLE IF NOT EXISTS channels(id INTEGER PRIMARY KEY AUTOINCREMENT, ref TEXT UNIQUE, enabled INTEGER DEFAULT 1)")
         self.q("CREATE TABLE IF NOT EXISTS links(code TEXT PRIMARY KEY, items TEXT, created REAL, views INTEGER DEFAULT 0)")
+        for col, typ in (("name", "TEXT"), ("delay", "INTEGER"), ("note", "TEXT")):
+            try:
+                self.q(f"ALTER TABLE links ADD COLUMN {col} {typ}")
+            except sqlite3.OperationalError:
+                pass
         self.q("CREATE TABLE IF NOT EXISTS pending(id INTEGER PRIMARY KEY AUTOINCREMENT, chat INTEGER, ids TEXT, at REAL)")
         self.q("CREATE TABLE IF NOT EXISTS log(ts REAL, kind TEXT, uid INTEGER, text TEXT)")
 
@@ -133,15 +138,23 @@ class Store:
         return self.q("SELECT ts,kind,uid,text FROM log ORDER BY ts DESC LIMIT ?", (n,), many=True)
 
     # links
-    def add_link(self, code, items):
-        self.q("INSERT INTO links(code,items,created) VALUES(?,?,?)", (code, json.dumps(items), time.time()))
+    def add_link(self, code, items, name=""):
+        self.q("INSERT INTO links(code,items,created,name) VALUES(?,?,?,?)", (code, json.dumps(items), time.time(), name))
+
+    def link_meta(self, code):
+        r = self.q("SELECT name,delay,note,views FROM links WHERE code=?", (code,), one=True)
+        return {"name": r[0] or "", "delay": r[1], "note": r[2], "views": r[3]} if r else None
+
+    def update_link(self, code, field, value):
+        assert field in ("name", "delay", "note")
+        self.q(f"UPDATE links SET {field}=? WHERE code=?", (value, code))
 
     def get_link(self, code):
         r = self.q("SELECT items,views FROM links WHERE code=?", (code,), one=True)
         return (json.loads(r[0]), r[1]) if r else None
 
     def links(self):
-        return [(c, len(json.loads(i)), v) for c, i, v in self.q("SELECT code,items,views FROM links ORDER BY created", many=True)]
+        return [(c, n or "", len(json.loads(i)), v) for c, n, i, v in self.q("SELECT code,name,items,views FROM links ORDER BY created", many=True)]
 
     def del_link(self, code):
         self.q("DELETE FROM links WHERE code=?", (code,))
