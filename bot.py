@@ -415,6 +415,18 @@ async def link_buttons(update: Update, ctx, parts):
         ctx.user_data.pop("collect", None)
         ctx.user_data.pop("cmsg", None)
         await q.message.reply_text("أُلغيت.")
+    elif act == "page":
+        ctx.user_data["lpage"] = int(parts[2])
+        t, m = screen("links", ctx)
+        await edit(q, t, m)
+    elif act == "search":
+        ctx.user_data["await"] = "lsearch"
+        await q.message.reply_text("اكتب جزء من اسم الرابط للبحث:\n(/cancel للإلغاء)")
+    elif act == "clearq":
+        ctx.user_data.pop("lq", None)
+        ctx.user_data["lpage"] = 0
+        t, m = screen("links", ctx)
+        await edit(q, t, m)
     elif act == "show":
         t, m = screen("link:" + parts[2], ctx)
         await q.message.reply_text(t, reply_markup=m)
@@ -587,12 +599,32 @@ def screen(name, ctx):
             [B("📋 سجل النشاط", callback_data="a:log")],
             [B("📩 دعوة أشخاص إلى البوت", callback_data="a:invite")], back()])
     if name == "links":
-        ls = s.links()
-        rows = [[B("➕ إنشاء رابط جديد", callback_data="n:new")]]
-        for c, nm, n, v in ls:
-            rows.append([B(f"🔗 {nm or c} ({n} ملف، {v} مشاهدة)", callback_data=f"n:show:{c}")])
+        ls = list(reversed(s.links()))  # newest first
+        q_ = (ctx.user_data.get("lq") or "").strip().lower()
+        if q_:
+            ls = [x for x in ls if q_ in (x[1] or x[0]).lower()]
+        per = 8
+        pages = max(1, -(-len(ls) // per))
+        pg = min(max(int(ctx.user_data.get("lpage") or 0), 0), pages - 1)
+        ctx.user_data["lpage"] = pg
+        rows = [[B("➕ إنشاء رابط جديد", callback_data="n:new"), B("🔎 بحث بالاسم", callback_data="n:search")]]
+        if q_:
+            rows.append([B(f"❌ مسح البحث: {q_[:20]}", callback_data="n:clearq")])
+        for c, nm, n, v in ls[pg * per:(pg + 1) * per]:
+            rows.append([B(f"🔗 {(nm or c)[:40]} · {n} ملف · {v} 👁", callback_data=f"n:show:{c}")])
+        if pages > 1:
+            nav = []
+            if pg > 0:
+                nav += [B("⏮", callback_data="n:page:0"), B("◀️", callback_data=f"n:page:{pg - 1}")]
+            nav.append(B(f"{pg + 1}/{pages}", callback_data="n:page:" + str(pg)))
+            if pg < pages - 1:
+                nav += [B("▶️", callback_data=f"n:page:{pg + 1}"), B("⏭", callback_data=f"n:page:{pages - 1}")]
+            rows.append(nav)
         rows.append(back())
-        return f"🔗 الروابط ({len(ls)})\n\nاضغط على رابط لعرضه وتعديل اسمه ومدة حذفه ورسالته.", M(rows)
+        head = f"🔗 الروابط ({len(ls)})" + (f" - نتائج البحث عن: {q_}" if q_ else "") + "\nالأحدث أول."
+        if not ls:
+            head += "\n\nما كو روابط" + (" بهذا الاسم." if q_ else ".")
+        return head + "\n\nاضغط على رابط لعرضه وتعديل إعداداته.", M(rows)
     if name.startswith("link:"):
         c = name[5:]
         meta = s.link_meta(c)
@@ -805,6 +837,12 @@ async def admin_input(update: Update, ctx) -> bool:
             return True
         t, m = screen("link:" + code, ctx)
         await update.message.reply_text("✔️ تم.\n\n" + t, reply_markup=m)
+        return True
+    if key == "lsearch":
+        ctx.user_data["lq"] = text[:50]
+        ctx.user_data["lpage"] = 0
+        t, m = screen("links", ctx)
+        await update.message.reply_text(t, reply_markup=m)
         return True
     if key == "delay":
         sec = parse_duration(text)
