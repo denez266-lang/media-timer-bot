@@ -588,6 +588,7 @@ async def user_cb(update: Update, ctx):
             await q.answer("المحتوى لسه موجود.")
             return
         ACTIVE.add((q.message.chat_id, code))
+        store.log("resend", uid, code)
         await notify_resend(ctx, q.from_user, code, meta)
         await q.answer("✅ ينرسل")
         try:
@@ -1135,7 +1136,54 @@ async def pub_input(update: Update, ctx, key):
     return False
 
 
+async def live_screen(q):
+    now = time.time()
+    if store.q("SELECT 1 FROM log WHERE ts<? LIMIT 1", (now - 30 * 86400,), one=True):
+        store.q("DELETE FROM log WHERE ts<?", (now - 30 * 86400,))
+    adm = set(store.admins()) | ADMIN_IDS
+    def cnt(sec):
+        rows = store.q("SELECT id FROM users WHERE last_seen>?", (now - sec,), many=True)
+        return len([r for r in rows if r[0] not in adm])
+    def ev(kind, sec):
+        return store.q("SELECT COUNT(*) FROM log WHERE kind=? AND ts>?", (kind, now - sec), one=True)[0]
+    total = store.q("SELECT COUNT(*) FROM users", one=True)[0]
+    rows = store.q("SELECT id,name,username,last_seen FROM users WHERE last_seen>? ORDER BY last_seen DESC LIMIT 40",
+                   (now - 86400,), many=True)
+    rows = [r for r in rows if r[0] not in adm][:12]
+    lines = []
+    for uid_, name, un, ls in rows:
+        a = store.q("SELECT kind,text,ts FROM log WHERE uid=? AND kind IN ('view','resend','join') ORDER BY ts DESC LIMIT 1", (uid_,), one=True)
+        act = "نشط"
+        if a:
+            lm = store.link_meta(a[1]) if a[0] != "join" else None
+            ln = (lm["name"] or a[1]) if lm else ""
+            act = {"view": "فتح", "resend": "ضغط إعادة الإرسال", "join": "دخل البوت"}[a[0]] + (f" ({_esc(ln)})" if ln else "")
+        ago = int(now - ls)
+        when = f"قبل {ago // 60} د" if ago >= 60 else f"قبل {ago} ث"
+        lines.append(f'• <a href="tg://user?id={uid_}">{_esc(name or str(uid_))}</a>' + (f" @{_esc(un)}" if un else "") + f" · {when} · آخر إجراء: {act}")
+    t = ("🟢 نشاط المستخدمين (آخر نشاط، مو تواجد مباشر)\n"
+         "تيليجرام ما يعطي البوت حالة الاتصال، فهذا آخر تفاعل مع البوت (رسالة أو ضغط زر).\n\n"
+         f"👥 أشخاص نشطوا: آخر 5 دقائق {cnt(300)} · آخر ساعة {cnt(3600)} · آخر 24 ساعة {cnt(86400)}\n"
+         f"👁 فتح روابط: {ev('view', 300)} / {ev('view', 3600)} / {ev('view', 86400)}\n"
+         f"🔁 ضغط إعادة الإرسال: {ev('resend', 300)} / {ev('resend', 3600)} / {ev('resend', 86400)}\n"
+         f"📊 إجمالي المستخدمين: {total}\n"
+         "ℹ️ زر المشاركة يفتح قائمة تيليجرام ولا يرسل للبوت إشارة، فما أقدر أحسب ضغطاته.\n\n"
+         + ("آخر النشطين:\n" + "\n".join(lines) if lines else "ما كو نشاط آخر 24 ساعة."))
+    return t[:4000], M([[B("🔄 تحديث", callback_data="n:live")]])
+
+
 async def link_buttons(update: Update, ctx, parts):
+    if parts[1] == "live":
+        q = update.callback_query
+        t, m = await live_screen(q)
+        if q.message.text and q.message.text.startswith("🟢"):
+            try:
+                await q.message.edit_text(t, reply_markup=m, parse_mode="HTML", link_preview_options=LinkPreviewOptions(is_disabled=True))
+            except TelegramError:
+                pass
+        else:
+            await q.message.reply_text(t, reply_markup=m, parse_mode="HTML", link_preview_options=LinkPreviewOptions(is_disabled=True))
+        return
     if parts[1].startswith("rp"):
         await rp_buttons(update, ctx, parts)
         return
@@ -1473,6 +1521,7 @@ def screen(name, ctx):
             [B("🔗 الروابط والمحتوى", callback_data="a:links")],
             [B("📢 الإذاعة", callback_data="a:comm"), B("👥 المستخدمون", callback_data="a:users")],
             [B("🔐 الاشتراك الإجباري", callback_data="a:sub"), B("💾 النسخ الاحتياطي", callback_data="a:backup")],
+            [B("🟢 نشاط الآن", callback_data="n:live")],
             [B("⚙️ الإعدادات", callback_data="a:settings"), B("🛠 النظام والدعم", callback_data="a:sys")],
         ]
         return f"🎛 لوحة الأدمن\n\n🔗 {nl} رابط  |  👥 {nu} مستخدم", M(rows)
