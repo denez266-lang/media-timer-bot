@@ -151,6 +151,38 @@ async def fwd_to_admin(update: Update, ctx):
         logging.warning("fwd_in error: %s", e)
 
 
+RESEND = {}
+
+
+async def notify_resend(ctx, user, code, meta):
+    """Tell admins a viewer tapped resend. One notice per person+link per 5 min; later taps edit it with a count."""
+    try:
+        if not store.on("fwd_in") or is_admin(user):
+            return
+        now = time.time()
+        r = RESEND.get((user.id, code))
+        txt = lambda n: (f"🔁 إعادة إرسال: {user.full_name}" + (f" @{user.username}" if user.username else "")
+                         + f"\nID: {user.id}\nالرابط: {meta['name'] or code}" + (f"\nعدد المرات: {n}" if n > 1 else ""))
+        if r and now - r["t"] < 300:
+            r["n"] += 1
+            for a, mid in r["m"].items():
+                try:
+                    await ctx.bot.edit_message_text(txt(r["n"]), chat_id=a, message_id=mid)
+                except TelegramError:
+                    pass
+            return
+        r = {"t": now, "n": 1, "m": {}}
+        for a in sorted(ADMIN_IDS | set(store.admins())):
+            try:
+                sent = await ctx.bot.send_message(a, txt(1), disable_notification=True)
+                r["m"][a] = sent.message_id
+            except TelegramError as e:
+                logging.warning("resend notice failed: %s", e)
+        RESEND[(user.id, code)] = r
+    except Exception as e:
+        logging.warning("resend notice error: %s", e)
+
+
 LANGS = {"ar": "العربية", "en": "English", "fa": "فارسی", "ku": "کوردی", "tr": "Türkçe", "ru": "Русский",
          "fr": "Français", "de": "Deutsch", "es": "Español", "hi": "हिन्दी", "ur": "اردو"}
 
@@ -512,6 +544,7 @@ async def user_cb(update: Update, ctx):
             await q.answer("المحتوى لسه موجود.")
             return
         ACTIVE.add((q.message.chat_id, code))
+        await notify_resend(ctx, q.from_user, code, meta)
         await q.answer("✅ ينرسل")
         try:
             await q.message.delete()
