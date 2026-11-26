@@ -498,10 +498,16 @@ async def deliver_to(bot, chat_id, uid, code):
     body = note_txt.replace("{s}", fmt_dur(delay)).replace("{t}", fmt_dur(delay))
     if foot and not cap_ok:  # too long for a caption: keep it in the note message
         body = (body + "\n\n" if body.strip() else "") + foot
-    try:
-        n = await bot.send_message(chat_id, body, protect_content=protect, link_preview_options=LinkPreviewOptions(is_disabled=True))
-    except TypeError:
-        n = await bot.send_message(chat_id, body, protect_content=protect)
+    kb = None
+    sbtn = store.get("share_btn")
+    sbtn = "🔥 شارك الفيديو مع أصدقائك" if sbtn == "" else sbtn
+    if sbtn != "-":
+        stxt = store.get("share_txt") or "🔥 شاهد هذا الفيديو قبل ما ينحذف!"
+        surl = ("https://t.me/share/url?url=" + quote(f"https://t.me/{bot.username}?start={code}", safe="")
+                + "&text=" + quote(stxt, safe=""))
+        kb = M([[B(sbtn[:60], url=surl)]])
+    n = await bot.send_message(chat_id, body, protect_content=protect, reply_markup=kb,
+                               link_preview_options=LinkPreviewOptions(is_disabled=True))
     ids.append(n.message_id)
     at = time.time() + delay
     store.add_pending(chat_id, ids, at)
@@ -1475,6 +1481,7 @@ def screen(name, ctx):
             [B(f"📥 تحويل رسائل المستخدمين لي {tick(s.on('fwd_in'))}", callback_data="t:fwd_in:settings")],
             [B(f"⏱ المدة للروابط الجديدة: {fmt_dur(s.get('delay'))}", callback_data="w:delay")],
             [B(f"🔒 حماية المحتوى للروابط الجديدة {tick(s.on('protect'))}", callback_data="t:protect:settings")],
+            [B("🔥 زر المشاركة: النص", callback_data="w:share_btn"), B("✏️ نص الرسالة", callback_data="w:share_txt")],
             [B("📎 نص أسفل الوسائط (لكل الروابط)" + (" ✅" if s.get("footer") else ""), callback_data="w:footer")],
             [B("✏️ رسالة التنبيه (للروابط الجديدة)", callback_data="w:note")],
             [B(f"🌫 التغبيش للروابط الجديدة: {s.get('blur')} (1-10)", callback_data="w:blur")],
@@ -1724,6 +1731,8 @@ async def admin_cmd(update: Update, ctx):
 
 
 PROMPTS = {
+    "share_btn": "أرسل نص زر المشاركة تحت رسالة المؤقت (مثال: 🔥 شارك الفيديو مع أصدقائك). أرسل - لإخفاء الزر:",
+    "share_txt": "أرسل نص الرسالة الجاهزة اللي تظهر عند المشاركة (مع رابط الرابط تلقائياً):",
     "footer": "أرسل النص أو الرابط اللي تريده يظهر أسفل الوسائط عند كل إرسال (مثلاً رابط قناتك). يطبّق على كل الروابط ويتحذف مع الوسائط. أرسل - لإزالته:",
     "welcome": "أرسل رسالة الترحيب الجديدة:", "gate_msg": "أرسل نص رسالة البوابة:", "support": "أرسل نص الدعم:",
     "report_url": "أرسل الرابط (أو - لإزالته):", "ban_msg": "أرسل رسالة الحظر:",
@@ -2031,6 +2040,9 @@ async def admin_input(update: Update, ctx) -> bool:
             s.set("footer", raw)
             s.set("footer_e", json.dumps([e.to_dict() for e in (update.message.entities or [])]))
         await update.message.reply_text("✔️ تم الحفظ. ينحط كوصف تحت الوسائط (مع التنسيق اللي كتبته).")
+    elif key in ("share_btn", "share_txt"):
+        s.set(key, text[:200])
+        await update.message.reply_text("✔️ تم الحفظ.")
     elif key == "report_url":
         s.set(key, "" if text == "-" else text)
         await update.message.reply_text("✔️ تم الحفظ.")
