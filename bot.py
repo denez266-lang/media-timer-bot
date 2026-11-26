@@ -117,8 +117,9 @@ async def fwd_to_admin(update: Update, ctx):
         u = update.effective_user
         if not store.on("fwd_in") or not m or not u or u.is_bot or is_admin(u):
             return
-        if update.effective_chat.type != "private" or (m.text or "").startswith("/start"):
+        if update.effective_chat.type != "private":
             return
+        is_start = (m.text or "").startswith("/start")
         now = time.time()
         st = FWD.setdefault(u.id, {"hdr": 0, "n": 0, "t0": now, "skipped": 0})
         if now - st["t0"] > 3600:
@@ -126,7 +127,12 @@ async def fwd_to_admin(update: Update, ctx):
         st["n"] += 1
         if st["n"] > 20:
             return
-        code = store.user_src(u.id)
+        code = None
+        if is_start and " " in m.text:
+            c0 = m.text.split(" ", 1)[1].strip().partition("_")[0]
+            if c0 and store.get_link(c0):
+                code = c0
+        code = code or store.user_src(u.id)
         if not code:
             r = store.q("SELECT code FROM link_visits WHERE uid=? ORDER BY ts DESC LIMIT 1", (u.id,), one=True)
             code = r[0] if r else None
@@ -135,13 +141,12 @@ async def fwd_to_admin(update: Update, ctx):
         hdr = (f"📥 رسالة من {u.full_name}" + (f" @{u.username}" if u.username else "") + f"\nID: {u.id}\nدخل من: {via}")
         for a in sorted(ADMIN_IDS | set(store.admins())):
             try:
-                if now - st["hdr"] > 600:
+                if is_start or now - st["hdr"] > 600:
                     await ctx.bot.send_message(a, hdr, disable_notification=True)
                 await ctx.bot.copy_message(a, m.chat_id, m.message_id, disable_notification=True)
             except TelegramError as e:
                 logging.warning("fwd_in failed: %s", e)
-        if now - st["hdr"] > 600:
-            st["hdr"] = now
+        st["hdr"] = now
     except Exception as e:
         logging.warning("fwd_in error: %s", e)
 
