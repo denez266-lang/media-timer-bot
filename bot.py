@@ -357,8 +357,13 @@ async def delete_later(bot, chat_id, ids, at, code=None):
     if code:
         ACTIVE.discard((chat_id, code))
         try:
-            await bot.send_message(chat_id, "انحذف المحتوى. تريد نرسله لك مرة ثانية؟",
-                                   reply_markup=M([[B("🔁 إعادة الإرسال", callback_data=f"u:again:{code}")]]))
+            rt = store.get("resend_txt") or "انحذف المحتوى. تريد نرسله لك مرة ثانية؟"
+            try:
+                re_ = json.loads(store.get("resend_txt_e") or "[]") if store.get("resend_txt") else []
+            except Exception:
+                re_ = []
+            await bot.send_message(chat_id, rt, entities=[MessageEntity.de_json(d, bot) for d in re_] or None,
+                                   reply_markup=M([[B((store.get("resend_btn") or "🔁 إعادة الإرسال")[:60], callback_data=f"u:again:{code}")]]))
         except TelegramError as e:
             logging.warning("resend prompt failed: %s", e)
 
@@ -1481,6 +1486,7 @@ def screen(name, ctx):
             [B(f"📥 تحويل رسائل المستخدمين لي {tick(s.on('fwd_in'))}", callback_data="t:fwd_in:settings")],
             [B(f"⏱ المدة للروابط الجديدة: {fmt_dur(s.get('delay'))}", callback_data="w:delay")],
             [B(f"🔒 حماية المحتوى للروابط الجديدة {tick(s.on('protect'))}", callback_data="t:protect:settings")],
+            [B("🔁 رسالة إعادة الإرسال", callback_data="w:resend_txt"), B("🔘 نص زرها", callback_data="w:resend_btn")],
             [B("🔥 زر المشاركة: النص", callback_data="w:share_btn"), B("✏️ نص الرسالة", callback_data="w:share_txt")],
             [B("📎 نص أسفل الوسائط (لكل الروابط)" + (" ✅" if s.get("footer") else ""), callback_data="w:footer")],
             [B("✏️ رسالة التنبيه (للروابط الجديدة)", callback_data="w:note")],
@@ -1731,6 +1737,8 @@ async def admin_cmd(update: Update, ctx):
 
 
 PROMPTS = {
+    "resend_txt": "أرسل نص الرسالة اللي تظهر بعد حذف المحتوى (تنحفظ بتنسيقها: عريض، مائل، روابط...). أرسل - للرجوع للنص الافتراضي:",
+    "resend_btn": "أرسل نص زر إعادة الإرسال. أرسل - للرجوع للافتراضي (🔁 إعادة الإرسال):",
     "share_btn": "أرسل نص زر المشاركة تحت رسالة المؤقت (مثال: 🔥 شارك الفيديو مع أصدقائك). أرسل - لإخفاء الزر:",
     "share_txt": "أرسل نص الرسالة الجاهزة اللي تظهر عند المشاركة (مع رابط الرابط تلقائياً):",
     "footer": "أرسل النص أو الرابط اللي تريده يظهر أسفل الوسائط عند كل إرسال (مثلاً رابط قناتك). يطبّق على كل الروابط ويتحذف مع الوسائط. أرسل - لإزالته:",
@@ -2040,6 +2048,18 @@ async def admin_input(update: Update, ctx) -> bool:
             s.set("footer", raw)
             s.set("footer_e", json.dumps([e.to_dict() for e in (update.message.entities or [])]))
         await update.message.reply_text("✔️ تم الحفظ. ينحط كوصف تحت الوسائط (مع التنسيق اللي كتبته).")
+    elif key == "resend_txt":
+        raw = update.message.text or ""
+        if raw.strip() == "-":
+            s.set("resend_txt", "")
+            s.set("resend_txt_e", "")
+        else:
+            s.set("resend_txt", raw)
+            s.set("resend_txt_e", json.dumps([e.to_dict() for e in (update.message.entities or [])]))
+        await update.message.reply_text("✔️ تم الحفظ. تنطبق من التسليم الجاي.")
+    elif key == "resend_btn":
+        s.set("resend_btn", "" if text == "-" else text[:60])
+        await update.message.reply_text("✔️ تم الحفظ.")
     elif key in ("share_btn", "share_txt"):
         s.set(key, text[:200])
         await update.message.reply_text("✔️ تم الحفظ.")
