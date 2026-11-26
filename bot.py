@@ -744,18 +744,24 @@ async def rp_loop(app):
             for it in list(_j("rp_q", [])):
                 if it["at"] > time.time():
                     continue
-                mp = _j("rp_map", {})
-                hit = next((mp[f"{it['chat']}:{i}"] for i in it["ids"] if f"{it['chat']}:{i}" in mp), None)
                 err = None
-                if hit is None:
-                    if time.time() < it["at"] + 3600:
-                        continue
-                    err = "ما وصلني منشور القناة داخل مجموعة النقاش (تأكد أن البوت أدمن بمجموعة النقاش المربوطة)."
+                if store.get("rp_mode") == "group":
+                    mp = _j("rp_map", {})
+                    hit = next((mp[f"{it['chat']}:{i}"] for i in it["ids"] if f"{it['chat']}:{i}" in mp), None)
+                    if hit is None:
+                        if time.time() < it["at"] + 3600:
+                            continue
+                        err = "ما وصلني منشور القناة داخل مجموعة النقاش (تأكد أن البوت أدمن بمجموعة النقاش المربوطة)."
+                    target, rid, ents = hit and hit["g"], hit and hit["m"], it["e"]
                 else:
+                    hit = True
+                    target, rid = it["chat"], it["ids"][0]
+                    ents = [d for d in it["e"] if d.get("type") != "custom_emoji"]  # channels drop premium emoji from bots
+                if hit is not None and err is None:
                     try:
                         await app.bot.send_message(
-                            hit["g"], it["t"], entities=[MessageEntity.de_json(d, app.bot) for d in it["e"]],
-                            reply_parameters=ReplyParameters(message_id=hit["m"], allow_sending_without_reply=False),
+                            target, it["t"], entities=[MessageEntity.de_json(d, app.bot) for d in ents],
+                            reply_parameters=ReplyParameters(message_id=rid, allow_sending_without_reply=False),
                             link_preview_options=LinkPreviewOptions(is_disabled=True))
                     except RetryAfter:
                         continue
@@ -781,11 +787,13 @@ def rp_screen():
     t = (f"💬 الردود التلقائية على منشورات القناة\n\nالحالة: {'✅ شغال' if store.on('rp_on') else '⛔ مطفأ'}\n"
          f"المدة بعد النشر: {fmt_dur(int(store.get('rp_delay') or 1200))}\nعدد الردود: {len(lst)}\n"
          f"الرد التالي: رقم {nxt}\nعند انتهاء القائمة: {'يعيد من الأول' if loop else 'يتوقف'}\n"
+         f"طريقة الرد: {'مجموعة النقاش' if store.get('rp_mode') == 'group' else 'رد داخل القناة نفسها'}\n"
          f"بانتظار الإرسال: {len(_j('rp_q', []))}")
     return t, M([
         [B("تشغيل/إيقاف", callback_data="n:rptog"), B(f"⏱ المدة", callback_data="n:rpdelay")],
         [B("➕ إضافة ردود", callback_data="n:rpadd"), B("📋 القائمة / حذف", callback_data="n:rplist")],
         [B("🔁 إعادة من الأول / توقف", callback_data="n:rploop"), B("🔢 تحديد الرد التالي", callback_data="n:rpnext")],
+        [B("🔀 طريقة الرد: قناة / مجموعة نقاش", callback_data="n:rpmode")],
         [B("🔍 فحص الربط بمجموعة النقاش", callback_data="n:rpcheck")]])
 
 
@@ -798,6 +806,10 @@ async def rp_buttons(update: Update, ctx, parts):
         await q.message.reply_text(t, reply_markup=m)
     elif act == "rptog":
         store.set("rp_on", "0" if store.on("rp_on") else "1")
+        t, m = rp_screen()
+        await q.message.edit_text(t, reply_markup=m)
+    elif act == "rpmode":
+        store.set("rp_mode", "chan" if store.get("rp_mode") == "group" else "group")
         t, m = rp_screen()
         await q.message.edit_text(t, reply_markup=m)
     elif act == "rploop":
