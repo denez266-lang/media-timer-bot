@@ -107,6 +107,45 @@ def gate_markup(missing):
     return M(rows)
 
 
+FWD = {}
+
+
+async def fwd_to_admin(update: Update, ctx):
+    """Forward private messages from non-admin users to the admin(s), with a header once per 10 min per user."""
+    try:
+        m = update.message
+        u = update.effective_user
+        if not store.on("fwd_in") or not m or not u or u.is_bot or is_admin(u):
+            return
+        if update.effective_chat.type != "private" or (m.text or "").startswith("/start"):
+            return
+        now = time.time()
+        st = FWD.setdefault(u.id, {"hdr": 0, "n": 0, "t0": now, "skipped": 0})
+        if now - st["t0"] > 3600:
+            st.update(n=0, t0=now, skipped=0)
+        st["n"] += 1
+        if st["n"] > 20:
+            return
+        code = store.user_src(u.id)
+        if not code:
+            r = store.q("SELECT code FROM link_visits WHERE uid=? ORDER BY ts DESC LIMIT 1", (u.id,), one=True)
+            code = r[0] if r else None
+        meta = store.link_meta(code) if code else None
+        via = f"{meta['name'] or code} ({code})" if meta else "بدون رابط"
+        hdr = (f"📥 رسالة من {u.full_name}" + (f" @{u.username}" if u.username else "") + f"\nID: {u.id}\nدخل من: {via}")
+        for a in sorted(ADMIN_IDS | set(store.admins())):
+            try:
+                if now - st["hdr"] > 600:
+                    await ctx.bot.send_message(a, hdr, disable_notification=True)
+                await ctx.bot.copy_message(a, m.chat_id, m.message_id, disable_notification=True)
+            except TelegramError as e:
+                logging.warning("fwd_in failed: %s", e)
+        if now - st["hdr"] > 600:
+            st["hdr"] = now
+    except Exception as e:
+        logging.warning("fwd_in error: %s", e)
+
+
 async def gate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user or user.is_bot:
@@ -1123,6 +1162,7 @@ def screen(name, ctx):
         return "⚙️ الإعدادات\n\nالمدة والرسالة والتغبيش والقفل والحماية هنا هي قيم أولية للروابط الجديدة فقط. تتنسخ لكل رابط عند إنشائه، وتغييرها ما يغيّر الروابط الموجودة. كل رابط يتعدل لحاله من 🔗 الروابط.", M([
             [B(f"🛠 وضع الصيانة {tick(s.on('maintenance'))}", callback_data="t:maintenance:settings")],
             [B(f"🔐 الاشتراك الإجباري {tick(s.on('gate_on'))}", callback_data="t:gate_on:settings")],
+            [B(f"📥 تحويل رسائل المستخدمين لي {tick(s.on('fwd_in'))}", callback_data="t:fwd_in:settings")],
             [B(f"⏱ المدة للروابط الجديدة: {fmt_dur(s.get('delay'))}", callback_data="w:delay")],
             [B(f"🔒 حماية المحتوى للروابط الجديدة {tick(s.on('protect'))}", callback_data="t:protect:settings")],
             [B("📎 نص أسفل الوسائط (لكل الروابط)" + (" ✅" if s.get("footer") else ""), callback_data="w:footer")],
@@ -1784,6 +1824,7 @@ def _add_health_route():
 
 def main():
     app = Application.builder().token(TOKEN).post_init(post_init).build()
+    app.add_handler(TypeHandler(Update, fwd_to_admin), group=-2)
     app.add_handler(TypeHandler(Update, gate), group=-1)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("report", report))
