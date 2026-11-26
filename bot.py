@@ -146,6 +146,26 @@ async def fwd_to_admin(update: Update, ctx):
         logging.warning("fwd_in error: %s", e)
 
 
+LANGS = {"ar": "العربية", "en": "English", "fa": "فارسی", "ku": "کوردی", "tr": "Türkçe", "ru": "Русский",
+         "fr": "Français", "de": "Deutsch", "es": "Español", "hi": "हिन्दी", "ur": "اردو"}
+
+
+def join_text(user, src=None):
+    lc = user.language_code or ""
+    ln = LANGS.get(lc.split("-")[0].lower(), "")
+    lang = f"{ln} ({lc})" if ln and lc else (lc or "غير معروفة")
+    total = store.q("SELECT COUNT(*) FROM users", one=True)[0]
+    t = ("👾 شخص جديد دخل البوت\n\n👤 معلومات العضو الجديد:\n"
+         f"• الاسم: {user.full_name}\n"
+         f"• المعرف: {'@' + user.username if user.username else 'لا يوجد'}\n"
+         f"• الآيدي: {user.id}\n\n"
+         f"• 🌐 اللغة: {lang}\n")
+    meta = store.link_meta(src) if src else None
+    if meta:
+        t += f"• 🔗 دخل من: {meta['name'] or src}\n"
+    return t + f"\n📊 إجمالي المستخدمين: {total}"
+
+
 async def gate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user or user.is_bot:
@@ -170,7 +190,7 @@ async def gate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             for a in set(store.admins()) | ADMIN_IDS:
                 if a != user.id:
                     try:
-                        await ctx.bot.send_message(a, f"👤 مستخدم جديد: {user.full_name} (@{user.username or '-'}) ID {user.id}")
+                        await ctx.bot.send_message(a, join_text(user, src))
                     except TelegramError:
                         pass
     if admin:
