@@ -143,14 +143,21 @@ async def fwd_to_admin(update: Update, ctx):
             code = r[0] if r else None
         meta = store.link_meta(code) if code else None
         via = f"{meta['name'] or code} ({code})" if meta else "بدون رابط"
-        hdr = (f"📥 رسالة من {mention(u)}" + (f" @{_esc(u.username)}" if u.username else "") + f"\nID: {u.id}\nدخل من: {_esc(via)}")
+        hdr = (f"👤 {mention(u)}" + (f" @{_esc(u.username)}" if u.username else "") + f" · ID {u.id} · من: {_esc(via)}")
+        need_hdr = is_start or now - st["hdr"] > 21600
         for a in sorted(ADMIN_IDS | set(store.admins())):
             try:
-                if is_start or now - st["hdr"] > 600:
+                if need_hdr:
                     await ctx.bot.send_message(a, hdr, disable_notification=True, parse_mode="HTML")
-                await ctx.bot.copy_message(a, m.chat_id, m.message_id, disable_notification=True)
+                try:
+                    await ctx.bot.forward_message(a, m.chat_id, m.message_id, disable_notification=True)
+                except TelegramError:
+                    await ctx.bot.copy_message(a, m.chat_id, m.message_id, disable_notification=True)
             except TelegramError as e:
                 logging.warning("fwd_in failed: %s", e)
+        if need_hdr:
+            st["hdr"] = now
+        return
         st["hdr"] = now
     except Exception as e:
         logging.warning("fwd_in error: %s", e)
