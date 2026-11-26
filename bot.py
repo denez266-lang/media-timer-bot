@@ -443,17 +443,29 @@ async def deliver_to(bot, chat_id, uid, code):
     note_txt = meta["note"] or ""
     protect = meta["protect"]
     ids = []
-    async def one(it):
+    foot = store.get("footer") or ""
+    if not foot.strip():
+        foot = ""
+    try:
+        fents = json.loads(store.get("footer_e") or "[]") if foot else []
+    except Exception:
+        fents = []
+    cap_ok = bool(foot) and _u16(foot) <= 1024
+    ckw = {}
+    if cap_ok:
+        ckw = {"caption": foot, "caption_entities": [MessageEntity.de_json(d, bot) for d in fents] or None}
+
+    async def one(it, cap=False):
         fn = {"photo": bot.send_photo, "video": bot.send_video,
               "animation": bot.send_animation, "document": bot.send_document}[it["t"]]
         try:
-            m = await fn(chat_id, it["f"], protect_content=protect)
+            m = await fn(chat_id, it["f"], protect_content=protect, **(ckw if cap else {}))
             ids.append(m.message_id)
         except TelegramError as e:
             logging.warning("send failed: %s", e)
 
     # Group runs of photos/videos (mixed) into albums of up to 10, and runs of documents separately.
-    # Animations can't go in albums. Order is kept.
+    # Animations can't go in albums. Order is kept. The footer is the caption of the last unit sent.
     runs = []
     for it in items:
         kind = "pv" if it["t"] in ("photo", "video") else ("doc" if it["t"] == "document" else "anim")
@@ -461,24 +473,30 @@ async def deliver_to(bot, chat_id, uid, code):
             runs[-1][1].append(it)
         else:
             runs.append((kind, [it]))
+    units = []
     for kind, run in runs:
         for i in range(0, len(run), 10):
             chunk = run[i:i + 10]
-            if len(chunk) == 1 or kind == "anim":
-                for it in chunk:
-                    await one(it)
-                continue
-            cls = {"photo": InputMediaPhoto, "video": InputMediaVideo, "document": InputMediaDocument}
-            try:
-                res = await bot.send_media_group(chat_id, [cls[it["t"]](it["f"]) for it in chunk], protect_content=protect)
-                ids.extend(m.message_id for m in res)
-            except TelegramError as e:
-                logging.warning("album send failed, falling back to single sends: %s", e)
-                for it in chunk:
-                    await one(it)
+            units.append((kind, chunk))
+    cls = {"photo": InputMediaPhoto, "video": InputMediaVideo, "document": InputMediaDocument}
+    for ui, (kind, chunk) in enumerate(units):
+        last = ui == len(units) - 1
+        if len(chunk) == 1 or kind == "anim":
+            for k, it in enumerate(chunk):
+                await one(it, cap=last and k == len(chunk) - 1)
+            continue
+        media = [cls[it["t"]](it["f"]) for it in chunk]
+        if last and cap_ok:
+            media[0] = cls[chunk[0]["t"]](chunk[0]["f"], **ckw)
+        try:
+            res = await bot.send_media_group(chat_id, media, protect_content=protect)
+            ids.extend(m.message_id for m in res)
+        except TelegramError as e:
+            logging.warning("album send failed, falling back to single sends: %s", e)
+            for k, it in enumerate(chunk):
+                await one(it, cap=last and k == len(chunk) - 1)
     body = note_txt.replace("{s}", fmt_dur(delay)).replace("{t}", fmt_dur(delay))
-    foot = (store.get("footer") or "").strip()
-    if foot:
+    if foot and not cap_ok:  # too long for a caption: keep it in the note message
         body = (body + "\n\n" if body.strip() else "") + foot
     try:
         n = await bot.send_message(chat_id, body, protect_content=protect, link_preview_options=LinkPreviewOptions(is_disabled=True))
@@ -2004,7 +2022,16 @@ async def admin_input(update: Update, ctx) -> bool:
     if key in ("welcome", "gate_msg", "support", "ban_msg", "note", "lock_msg"):
         s.set(key, text)
         await update.message.reply_text("✔️ تم الحفظ.")
-    elif key in ("report_url", "footer"):
+    elif key == "footer":
+        raw = update.message.text or ""
+        if raw.strip() == "-":
+            s.set("footer", "")
+            s.set("footer_e", "")
+        else:
+            s.set("footer", raw)
+            s.set("footer_e", json.dumps([e.to_dict() for e in (update.message.entities or [])]))
+        await update.message.reply_text("✔️ تم الحفظ. ينحط كوصف تحت الوسائط (مع التنسيق اللي كتبته).")
+    elif key == "report_url":
         s.set(key, "" if text == "-" else text)
         await update.message.reply_text("✔️ تم الحفظ.")
     elif key in ("admin_add", "admin_del", "ban", "unban"):
