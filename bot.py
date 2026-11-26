@@ -1529,25 +1529,36 @@ def screen(name, ctx):
         return f"📝 المحتوى\n\nرسالة الترحيب الحالية:\n{s.get('welcome')}", M([
             [B("✏️ تعديل رسالة الترحيب", callback_data="w:welcome")], back("settings")])
     if name == "settings":
-        return "⚙️ الإعدادات\n\nالمدة والرسالة والتغبيش والقفل والحماية هنا هي قيم أولية للروابط الجديدة فقط. تتنسخ لكل رابط عند إنشائه، وتغييرها ما يغيّر الروابط الموجودة. كل رابط يتعدل لحاله من 🔗 الروابط.", M([
-            [B(f"🛠 وضع الصيانة {tick(s.on('maintenance'))}", callback_data="t:maintenance:settings")],
-            [B(f"🔐 الاشتراك الإجباري {tick(s.on('gate_on'))}", callback_data="t:gate_on:settings")],
+        return "⚙️ الإعدادات\n\nالتشغيل والإيقاف هنا، والباقي مقسّم بالأقسام تحت.", M([
+            [B(f"🛠 الصيانة {tick(s.on('maintenance'))}", callback_data="t:maintenance:settings"),
+             B(f"🔐 الاشتراك الإجباري {tick(s.on('gate_on'))}", callback_data="t:gate_on:settings")],
             [B(f"📥 تحويل رسائل المستخدمين لي {tick(s.on('fwd_in'))}", callback_data="t:fwd_in:settings")],
-            [B(f"⏱ المدة للروابط الجديدة: {fmt_dur(s.get('delay'))}", callback_data="w:delay")],
-            [B(f"🔒 حماية المحتوى للروابط الجديدة {tick(s.on('protect'))}", callback_data="t:protect:settings")],
+            [B(f"🚫 إشعار الحظر {tick(s.on('ban_notice'))}", callback_data="a:bannotice"),
+             B(f"🔔 إشعار الدخول {tick(s.on('notify_join'))}", callback_data="a:joinnotice")],
+            [B("🔗 قيم الروابط الجديدة", callback_data="a:set_new")],
+            [B("💬 الرسائل والأزرار", callback_data="a:set_msg")],
+            [B("📣 النشر في القناة", callback_data="a:set_pub")],
+            back()])
+    if name == "set_new":
+        return "🔗 قيم الروابط الجديدة\n\nهذي قيم أولية للروابط الجديدة فقط. تتنسخ لكل رابط عند إنشائه، وتغييرها ما يغيّر الروابط الموجودة. كل رابط يتعدل لحاله من 🔗 الروابط.", M([
+            [B(f"⏱ المدة: {fmt_dur(s.get('delay'))}", callback_data="w:delay"),
+             B(f"🌫 التغبيش: {s.get('blur')} (1-10)", callback_data="w:blur")],
+            [B(f"🔒 حماية المحتوى {tick(s.on('protect'))}", callback_data="t:protect:set_new")],
+            [B("✏️ رسالة التنبيه", callback_data="w:note"), B("🔐 رسالة القفل", callback_data="w:lock_msg")],
+            back("settings")])
+    if name == "set_msg":
+        return "💬 الرسائل والأزرار\n\nالنص أسفل الوسائط يطبق على كل الروابط. باقي الرسائل تنطبق من التسليم الجاي.", M([
+            [B("📎 النص أسفل الوسائط" + (" ✅" if s.get("footer") else ""), callback_data="w:footer")],
             [B("🔁 رسالة إعادة الإرسال", callback_data="w:resend_txt"), B("🔘 نص زرها", callback_data="w:resend_btn")],
-            [B("🔥 زر المشاركة: النص", callback_data="w:share_btn"), B("✏️ نص الرسالة", callback_data="w:share_txt")],
-            [B("📎 نص أسفل الوسائط (لكل الروابط)" + (" ✅" if s.get("footer") else ""), callback_data="w:footer")],
-            [B("✏️ رسالة التنبيه (للروابط الجديدة)", callback_data="w:note")],
-            [B(f"🌫 التغبيش للروابط الجديدة: {s.get('blur')} (1-10)", callback_data="w:blur")],
-            [B("🔐 رسالة القفل (للروابط الجديدة)", callback_data="w:lock_msg")],
+            [B("🔥 زر المشاركة: النص", callback_data="w:share_btn"), B("✏️ نص رسالة المشاركة", callback_data="w:share_txt")],
+            [B("📝 رسالة الترحيب", callback_data="a:content")],
+            back("settings")])
+    if name == "set_pub":
+        return "📣 النشر في القناة", M([
             [B(f"📣 قناة النشر: {s.get('post_chan_name') or 'غير محددة'}", callback_data="n:pchan")],
             [B("✏️ وصف النشر الثابت" + (" ✅" if s.get("pub_cap") else ""), callback_data="n:pcapset")],
             [B("💬 ردود تلقائية على المنشورات" + (" ✅" if s.on("rp_on") else ""), callback_data="n:rp")],
-            [B("📝 رسالة الترحيب", callback_data="a:content")],
-            [B(f"🚫 إشعار الحظر {tick(s.on('ban_notice'))}", callback_data="a:bannotice"),
-             B(f"🔔 إشعار الدخول {tick(s.on('notify_join'))}", callback_data="a:joinnotice")],
-            back()])
+            back("settings")])
     if name == "users":
         return "👥 المستخدمون\n\nإدارة المستخدمين والأدمنية", M([
             [B("📊 الإحصائيات", callback_data="a:stats"), B("👤 المسؤولون", callback_data="a:admins")],
