@@ -1,7 +1,7 @@
 import os, time, asyncio, logging, datetime
 import json, secrets, tempfile, io
 from urllib.parse import quote
-from telegram import LinkPreviewOptions, InputMediaPhoto, InputMediaVideo, InputMediaDocument, MessageEntity
+from telegram import ReplyParameters, LinkPreviewOptions, InputMediaPhoto, InputMediaVideo, InputMediaDocument, MessageEntity
 import httpx
 from telegram import InlineKeyboardButton as B, InlineKeyboardMarkup as M, Update
 from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
@@ -211,6 +211,9 @@ def join_text(user, src=None):
 async def gate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user or user.is_bot:
+        return
+    ch = update.effective_chat
+    if ch is not None and ch.type != "private":
         return
     admin = is_admin(user)
     inviter = None
@@ -679,13 +682,216 @@ async def pub_buttons(update: Update, ctx, parts):
         use = [d for d in pub["ents"] if d.get("type") != "custom_emoji"]
         try:
             chat = int(ref) if ref.lstrip("-").isdigit() else ref
-            await ctx.bot.send_media_group(chat, _pub_media(ctx.bot, pub, pub["cap"], use))
+            res = await ctx.bot.send_media_group(chat, _pub_media(ctx.bot, pub, pub["cap"], use))
             store.log("channel_post", update.effective_user.id, pub["code"])
             ctx.user_data.pop("pub", None)
-            await q.message.reply_text("✅ اننشر بالقناة.")
+            try:
+                rn = rp_enqueue(res)
+            except Exception as e3:
+                logging.warning("rp_enqueue: %s", e3)
+                rn = ""
+            await q.message.reply_text("✅ اننشر بالقناة." + rn)
         except Exception as e:
             await q.message.reply_text("فشل النشر: " + str(e)[:150])
         return
+
+
+# ---------------- auto replies to channel posts ----------------
+def _j(key, default):
+    try:
+        return json.loads(store.get(key) or "")
+    except Exception:
+        return default
+
+
+def rp_enqueue(res):
+    """Called after a channel post. Returns a short note for the admin (or '')."""
+    if not store.on("rp_on"):
+        return ""
+    lst = _j("rp_list", [])
+    if not lst:
+        return "\n⚠️ الرد التلقائي شغال لكن قائمة الردود فاضية."
+    n = int(store.get("rp_next") or 0)
+    loop = store.get("rp_loop") != "0"
+    if not loop and n >= len(lst):
+        return "\n⚠️ انتهت قائمة الردود، ما انضاف رد لهذا المنشور."
+    item = lst[n % len(lst)]
+    store.set("rp_next", str(n + 1))
+    q = _j("rp_q", [])
+    q.append({"id": secrets.token_hex(4), "chat": res[0].chat.id, "ids": [r.message_id for r in res],
+              "at": time.time() + int(store.get("rp_delay") or 1200), "t": item["t"], "e": item["e"], "n": n % len(lst) + 1})
+    store.set("rp_q", json.dumps(q))
+    return f"\n💬 الرد رقم {n % len(lst) + 1} ينرسل بعد {fmt_dur(int(store.get('rp_delay') or 1200))}."
+
+
+async def rp_map(update: Update, ctx):
+    m = update.message
+    fo = getattr(m, "forward_origin", None)
+    if not m or getattr(fo, "type", None) != "channel":
+        return
+    mp = _j("rp_map", {})
+    mp[f"{fo.chat.id}:{fo.message_id}"] = {"g": m.chat_id, "m": m.message_id}
+    if len(mp) > 300:
+        for k in list(mp)[:len(mp) - 300]:
+            mp.pop(k, None)
+    store.set("rp_map", json.dumps(mp))
+
+
+async def rp_loop(app):
+    while True:
+        await asyncio.sleep(15)
+        try:
+            for it in list(_j("rp_q", [])):
+                if it["at"] > time.time():
+                    continue
+                mp = _j("rp_map", {})
+                hit = next((mp[f"{it['chat']}:{i}"] for i in it["ids"] if f"{it['chat']}:{i}" in mp), None)
+                err = None
+                if hit is None:
+                    if time.time() < it["at"] + 3600:
+                        continue
+                    err = "ما وصلني منشور القناة داخل مجموعة النقاش (تأكد أن البوت أدمن بمجموعة النقاش المربوطة)."
+                else:
+                    try:
+                        await app.bot.send_message(
+                            hit["g"], it["t"], entities=[MessageEntity.de_json(d, app.bot) for d in it["e"]],
+                            reply_parameters=ReplyParameters(message_id=hit["m"], allow_sending_without_reply=False),
+                            link_preview_options=LinkPreviewOptions(is_disabled=True))
+                    except RetryAfter:
+                        continue
+                    except TelegramError as e:
+                        err = str(e)[:150]
+                q = [x for x in _j("rp_q", []) if x["id"] != it["id"]]
+                store.set("rp_q", json.dumps(q))
+                if err:
+                    for a in sorted(ADMIN_IDS | set(store.admins())):
+                        try:
+                            await app.bot.send_message(a, f"⚠️ فشل الرد التلقائي رقم {it.get('n')}: {err}")
+                        except TelegramError:
+                            pass
+        except Exception as e:
+            logging.warning("rp_loop: %s", e)
+
+
+def rp_screen():
+    lst = _j("rp_list", [])
+    n = int(store.get("rp_next") or 0)
+    loop = store.get("rp_loop") != "0"
+    nxt = (n % len(lst) + 1) if lst and loop else (n + 1)
+    t = (f"💬 الردود التلقائية على منشورات القناة\n\nالحالة: {'✅ شغال' if store.on('rp_on') else '⛔ مطفأ'}\n"
+         f"المدة بعد النشر: {fmt_dur(int(store.get('rp_delay') or 1200))}\nعدد الردود: {len(lst)}\n"
+         f"الرد التالي: رقم {nxt}\nعند انتهاء القائمة: {'يعيد من الأول' if loop else 'يتوقف'}\n"
+         f"بانتظار الإرسال: {len(_j('rp_q', []))}")
+    return t, M([
+        [B("تشغيل/إيقاف", callback_data="n:rptog"), B(f"⏱ المدة", callback_data="n:rpdelay")],
+        [B("➕ إضافة ردود", callback_data="n:rpadd"), B("📋 القائمة / حذف", callback_data="n:rplist")],
+        [B("🔁 إعادة من الأول / توقف", callback_data="n:rploop"), B("🔢 تحديد الرد التالي", callback_data="n:rpnext")],
+        [B("🔍 فحص الربط بمجموعة النقاش", callback_data="n:rpcheck")]])
+
+
+async def rp_buttons(update: Update, ctx, parts):
+    q = update.callback_query
+    act = parts[1]
+    lst = _j("rp_list", [])
+    if act == "rp":
+        t, m = rp_screen()
+        await q.message.reply_text(t, reply_markup=m)
+    elif act == "rptog":
+        store.set("rp_on", "0" if store.on("rp_on") else "1")
+        t, m = rp_screen()
+        await q.message.edit_text(t, reply_markup=m)
+    elif act == "rploop":
+        store.set("rp_loop", "0" if store.get("rp_loop") != "0" else "1")
+        t, m = rp_screen()
+        await q.message.edit_text(t, reply_markup=m)
+    elif act == "rpdelay":
+        ctx.user_data["await"] = "rpdelay"
+        await q.message.reply_text("أرسل المدة بعد النشر قبل الرد (مثال: 20 دقيقة أو 2 ساعة، لحد 24 ساعة):\n(/cancel للإلغاء)")
+    elif act == "rpnext":
+        ctx.user_data["await"] = "rpnext"
+        await q.message.reply_text(f"أرسل رقم الرد اللي تريده يكون التالي (من 1 إلى {max(1, len(lst))}):\n(/cancel للإلغاء)")
+    elif act == "rpadd":
+        ctx.user_data["await"] = "rpadd"
+        await q.message.reply_text("أرسل نص الرد بالتنسيق اللي تريده (عريض، مائل، مخفي، روابط...) وينرسل مثل ما كتبته. كل رسالة = رد واحد. اضغط تم لما تخلص.",
+                                   reply_markup=M([[B("✅ تم", callback_data="n:rpdone")]]))
+    elif act == "rpdone":
+        ctx.user_data.pop("await", None)
+        t, m = rp_screen()
+        await q.message.reply_text(t, reply_markup=m)
+    elif act == "rplist":
+        if not lst:
+            await q.message.reply_text("القائمة فاضية.")
+            return
+        txt = "\n".join(f"{i + 1}. {x['t'][:50].replace(chr(10), ' ')}" for i, x in enumerate(lst))[:3500]
+        rows = [[B(f"🗑 {i + 1}", callback_data=f"n:rpdel:{i}") for i in range(r, min(r + 5, len(lst)))] for r in range(0, min(len(lst), 40), 5)]
+        rows.append([B("🗑 مسح الكل", callback_data="n:rpclear")])
+        await q.message.reply_text(txt, reply_markup=M(rows))
+    elif act == "rpdel":
+        i = int(parts[2])
+        if 0 <= i < len(lst):
+            lst.pop(i)
+            store.set("rp_list", json.dumps(lst))
+        await q.message.reply_text(f"✔️ انحذف. باقي {len(lst)}. افتح 📋 القائمة مرة ثانية للأرقام الجديدة.")
+    elif act == "rpclear":
+        await q.message.reply_text("متأكد تمسح كل الردود؟", reply_markup=M([[B("نعم امسح", callback_data="n:rpclearyes")]]))
+    elif act == "rpclearyes":
+        store.set("rp_list", "[]")
+        store.set("rp_next", "0")
+        await q.message.reply_text("✔️ انمسحت القائمة.")
+    elif act == "rpcheck":
+        ref = store.get("post_chan")
+        if not ref:
+            await q.message.reply_text("حدد قناة النشر أول.")
+            return
+        try:
+            chat = int(ref) if ref.lstrip("-").isdigit() else ref
+            ch = await ctx.bot.get_chat(chat)
+            lc = getattr(ch, "linked_chat_id", None)
+            if not lc:
+                await q.message.reply_text("القناة غير مربوطة بمجموعة نقاش. افتح القناة > إعدادات > النقاش (Discussion) واربط مجموعة، وبعدها أضف البوت أدمن فيها.")
+                return
+            me = await ctx.bot.get_me()
+            mem = await ctx.bot.get_chat_member(lc, me.id)
+            st = mem.status
+            ok = st == "administrator" or st == "creator"
+            await q.message.reply_text(
+                f"القناة مربوطة بمجموعة نقاش (ID {lc}). حالة البوت فيها: {st}.\n"
+                + ("✅ جاهز." if ok else "⚠️ لازم تخلي البوت أدمن بمجموعة النقاش حتى يشوف منشورات القناة ويرد عليها."))
+        except TelegramError as e:
+            await q.message.reply_text("ما كدرت أفحص: " + str(e)[:150] + "\nغالباً البوت مو بمجموعة النقاش، أضفه أدمن فيها.")
+
+
+async def rp_input(update: Update, ctx, key):
+    m = update.message
+    text = m.text or ""
+    if key == "rpdelay":
+        sec = parse_duration(text.strip())
+        if sec is None:
+            ctx.user_data["await"] = key
+            await m.reply_text("ما فهمت المدة. اكتب مثل: 20 دقيقة أو 2 ساعة.")
+            return True
+        store.set("rp_delay", str(sec))
+        await m.reply_text(f"✔️ المدة صارت {fmt_dur(sec)}. تنطبق على المنشورات الجاية.")
+    elif key == "rpnext":
+        lst = _j("rp_list", [])
+        if not text.strip().isdigit() or not 1 <= int(text) <= max(1, len(lst)):
+            ctx.user_data["await"] = key
+            await m.reply_text("رقم صحيح ضمن القائمة.")
+            return True
+        store.set("rp_next", str(int(text) - 1))
+        await m.reply_text(f"✔️ الرد التالي رقم {int(text)}.")
+    elif key == "rpadd":
+        if not text.strip():
+            ctx.user_data["await"] = key
+            await m.reply_text("أرسل نص فقط (مع تنسيق). اضغط تم لما تخلص.")
+            return True
+        lst = _j("rp_list", [])
+        lst.append({"t": text, "e": [e.to_dict() for e in (m.entities or [])]})
+        store.set("rp_list", json.dumps(lst))
+        ctx.user_data["await"] = key
+        await m.reply_text(f"➕ انضاف الرد رقم {len(lst)}. أرسل التالي أو اضغط تم.",
+                           reply_markup=M([[B("✅ تم", callback_data="n:rpdone")]]))
+    return True
 
 
 async def _ask_top(msg, ctx):
@@ -882,6 +1088,9 @@ async def pub_input(update: Update, ctx, key):
 
 
 async def link_buttons(update: Update, ctx, parts):
+    if parts[1].startswith("rp"):
+        await rp_buttons(update, ctx, parts)
+        return
     if parts[1] in ("pub", "pubdone", "pubgo", "pubcancel", "pchan", "pubcap2", "pcapset", "pubgoplain", "pubdel", "pubkeep", "pubskip"):
         await pub_buttons(update, ctx, parts)
         return
@@ -1202,6 +1411,7 @@ async def post_init(app):
     for chat, ids, at in store.pending():
         asyncio.create_task(delete_later(app.bot, chat, ids, at))
     asyncio.create_task(backup_loop(app))
+    asyncio.create_task(rp_loop(app))
 
 
 # ---------------- admin panel ----------------
@@ -1234,6 +1444,7 @@ def screen(name, ctx):
             [B("🔐 رسالة القفل (للروابط الجديدة)", callback_data="w:lock_msg")],
             [B(f"📣 قناة النشر: {s.get('post_chan_name') or 'غير محددة'}", callback_data="n:pchan")],
             [B("✏️ وصف النشر الثابت" + (" ✅" if s.get("pub_cap") else ""), callback_data="n:pcapset")],
+            [B("💬 ردود تلقائية على المنشورات" + (" ✅" if s.on("rp_on") else ""), callback_data="n:rp")],
             [B("📝 رسالة الترحيب", callback_data="a:content")],
             [B(f"🚫 إشعار الحظر {tick(s.on('ban_notice'))}", callback_data="a:bannotice"),
              B(f"🔔 إشعار الدخول {tick(s.on('notify_join'))}", callback_data="a:joinnotice")],
@@ -1704,6 +1915,8 @@ async def admin_input(update: Update, ctx) -> bool:
     if not key or not is_admin(update.effective_user):
         return False
     ctx.user_data.pop("await")
+    if key.startswith("rp"):
+        return await rp_input(update, ctx, key)
     if key in ("pcap", "pchan", "pcapset", "ptop"):
         return await pub_input(update, ctx, key)
     if key == "restore":
@@ -1887,6 +2100,7 @@ def _add_health_route():
 
 def main():
     app = Application.builder().token(TOKEN).post_init(post_init).build()
+    app.add_handler(MessageHandler(filters.IS_AUTOMATIC_FORWARD, rp_map), group=-3)
     app.add_handler(TypeHandler(Update, fwd_to_admin), group=-2)
     app.add_handler(TypeHandler(Update, gate), group=-1)
     app.add_handler(CommandHandler("start", start))
