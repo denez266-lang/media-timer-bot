@@ -107,7 +107,12 @@ def gate_markup(missing):
     return M(rows)
 
 
+from html import escape as _esc
 FWD = {}
+
+
+def mention(u):
+    return f'<a href="tg://user?id={u.id}">{_esc(u.full_name or str(u.id))}</a>'
 
 
 async def fwd_to_admin(update: Update, ctx):
@@ -138,11 +143,11 @@ async def fwd_to_admin(update: Update, ctx):
             code = r[0] if r else None
         meta = store.link_meta(code) if code else None
         via = f"{meta['name'] or code} ({code})" if meta else "بدون رابط"
-        hdr = (f"📥 رسالة من {u.full_name}" + (f" @{u.username}" if u.username else "") + f"\nID: {u.id}\nدخل من: {via}")
+        hdr = (f"📥 رسالة من {mention(u)}" + (f" @{_esc(u.username)}" if u.username else "") + f"\nID: {u.id}\nدخل من: {_esc(via)}")
         for a in sorted(ADMIN_IDS | set(store.admins())):
             try:
                 if is_start or now - st["hdr"] > 600:
-                    await ctx.bot.send_message(a, hdr, disable_notification=True)
+                    await ctx.bot.send_message(a, hdr, disable_notification=True, parse_mode="HTML")
                 await ctx.bot.copy_message(a, m.chat_id, m.message_id, disable_notification=True)
             except TelegramError as e:
                 logging.warning("fwd_in failed: %s", e)
@@ -161,20 +166,20 @@ async def notify_resend(ctx, user, code, meta):
             return
         now = time.time()
         r = RESEND.get((user.id, code))
-        txt = lambda n: (f"🔁 إعادة إرسال: {user.full_name}" + (f" @{user.username}" if user.username else "")
-                         + f"\nID: {user.id}\nالرابط: {meta['name'] or code}" + (f"\nعدد المرات: {n}" if n > 1 else ""))
+        txt = lambda n: (f"🔁 إعادة إرسال: {mention(user)}" + (f" @{_esc(user.username)}" if user.username else "")
+                         + f"\nID: {user.id}\nالرابط: {_esc(meta['name'] or code)}" + (f"\nعدد المرات: {n}" if n > 1 else ""))
         if r and now - r["t"] < 300:
             r["n"] += 1
             for a, mid in r["m"].items():
                 try:
-                    await ctx.bot.edit_message_text(txt(r["n"]), chat_id=a, message_id=mid)
+                    await ctx.bot.edit_message_text(txt(r["n"]), chat_id=a, message_id=mid, parse_mode="HTML")
                 except TelegramError:
                     pass
             return
         r = {"t": now, "n": 1, "m": {}}
         for a in sorted(ADMIN_IDS | set(store.admins())):
             try:
-                sent = await ctx.bot.send_message(a, txt(1), disable_notification=True)
+                sent = await ctx.bot.send_message(a, txt(1), disable_notification=True, parse_mode="HTML")
                 r["m"][a] = sent.message_id
             except TelegramError as e:
                 logging.warning("resend notice failed: %s", e)
@@ -193,13 +198,13 @@ def join_text(user, src=None):
     lang = f"{ln} ({lc})" if ln and lc else (lc or "غير معروفة")
     total = store.q("SELECT COUNT(*) FROM users", one=True)[0]
     t = ("👾 شخص جديد دخل البوت\n\n👤 معلومات العضو الجديد:\n"
-         f"• الاسم: {user.full_name}\n"
-         f"• المعرف: {'@' + user.username if user.username else 'لا يوجد'}\n"
+         f"• الاسم: {mention(user)}\n"
+         f"• المعرف: {'@' + _esc(user.username) if user.username else 'لا يوجد'}\n"
          f"• الآيدي: {user.id}\n\n"
          f"• 🌐 اللغة: {lang}\n")
     meta = store.link_meta(src) if src else None
     if meta:
-        t += f"• 🔗 دخل من: {meta['name'] or src}\n"
+        t += f"• 🔗 دخل من: {_esc(meta['name'] or src)}\n"
     return t + f"\n📊 إجمالي المستخدمين: {total}"
 
 
@@ -227,7 +232,7 @@ async def gate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             for a in set(store.admins()) | ADMIN_IDS:
                 if a != user.id:
                     try:
-                        await ctx.bot.send_message(a, join_text(user, src))
+                        await ctx.bot.send_message(a, join_text(user, src), parse_mode="HTML")
                     except TelegramError:
                         pass
     if admin:
