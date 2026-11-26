@@ -465,7 +465,7 @@ async def deliver_to(bot, chat_id, uid, code):
             logging.warning("send failed: %s", e)
 
     # Group runs of photos/videos (mixed) into albums of up to 10, and runs of documents separately.
-    # Animations can't go in albums. Order is kept. The footer is the caption of the last unit sent.
+    # Animations can't go in albums. Order is kept. The footer is the caption of every unit sent.
     runs = []
     for it in items:
         kind = "pv" if it["t"] in ("photo", "video") else ("doc" if it["t"] == "document" else "anim")
@@ -480,10 +480,10 @@ async def deliver_to(bot, chat_id, uid, code):
             units.append((kind, chunk))
     cls = {"photo": InputMediaPhoto, "video": InputMediaVideo, "document": InputMediaDocument}
     for ui, (kind, chunk) in enumerate(units):
-        last = ui == len(units) - 1
+        last = True  # footer caption on every album/single
         if len(chunk) == 1 or kind == "anim":
             for k, it in enumerate(chunk):
-                await one(it, cap=last and k == len(chunk) - 1)
+                await one(it, cap=True)
             continue
         media = [cls[it["t"]](it["f"]) for it in chunk]
         if last and cap_ok:
